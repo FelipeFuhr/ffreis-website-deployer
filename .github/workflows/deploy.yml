@@ -65,7 +65,7 @@ jobs:
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           repository: ${{ vars.INVENTORY_REPO || format('{0}/websites-inventory', github.repository_owner) }}
-          token: ${{ secrets.FLEET_READ_TOKEN }}
+          token: ${{ startsWith(vars.INVENTORY_REPO || format('{0}/websites-inventory', github.repository_owner), 'ffreis-org/') && secrets.FLEET_READ_TOKEN_ORG || secrets.FLEET_READ_TOKEN_FFREIS }}
 
       - name: Parse inventory and resolve deployments
         id: parse
@@ -253,7 +253,7 @@ jobs:
           repository: ${{ matrix.deployment.data_repo }}
           ref: ${{ github.event.client_payload.data_sha || inputs.data_sha || matrix.deployment.data_ref }}
           path: checkout/data
-          token: ${{ secrets.FLEET_READ_TOKEN }}
+          token: ${{ startsWith(matrix.deployment.data_repo, 'ffreis-org/') && secrets.FLEET_READ_TOKEN_ORG || secrets.FLEET_READ_TOKEN_FFREIS }}
 
       - name: Checkout website repo
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
@@ -261,7 +261,7 @@ jobs:
           repository: ${{ matrix.deployment.website_repo }}
           ref: ${{ inputs.website_sha || matrix.deployment.website_ref }}
           path: checkout/website
-          token: ${{ secrets.FLEET_READ_TOKEN }}
+          token: ${{ startsWith(matrix.deployment.website_repo, 'ffreis-org/') && secrets.FLEET_READ_TOKEN_ORG || secrets.FLEET_READ_TOKEN_FFREIS }}
 
       - name: Checkout compiler
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
@@ -269,7 +269,7 @@ jobs:
           repository: ${{ matrix.deployment.compiler_repo }}
           ref: ${{ matrix.deployment.compiler_ref }}
           path: checkout/compiler
-          token: ${{ secrets.FLEET_READ_TOKEN }}
+          token: ${{ startsWith(matrix.deployment.compiler_repo, 'ffreis-org/') && secrets.FLEET_READ_TOKEN_ORG || secrets.FLEET_READ_TOKEN_FFREIS }}
 
       - uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6.4.0
         with:
@@ -346,7 +346,7 @@ jobs:
           repository: ${{ matrix.deployment.data_repo }}
           ref: ${{ github.event.client_payload.data_sha || inputs.data_sha || matrix.deployment.data_ref }}
           path: checkout/data
-          token: ${{ secrets.FLEET_READ_TOKEN }}
+          token: ${{ startsWith(matrix.deployment.data_repo, 'ffreis-org/') && secrets.FLEET_READ_TOKEN_ORG || secrets.FLEET_READ_TOKEN_FFREIS }}
 
       - name: Checkout website repo
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
@@ -354,7 +354,7 @@ jobs:
           repository: ${{ matrix.deployment.website_repo }}
           ref: ${{ inputs.website_sha || matrix.deployment.website_ref }}
           path: checkout/website
-          token: ${{ secrets.FLEET_READ_TOKEN }}
+          token: ${{ startsWith(matrix.deployment.website_repo, 'ffreis-org/') && secrets.FLEET_READ_TOKEN_ORG || secrets.FLEET_READ_TOKEN_FFREIS }}
 
       - name: Checkout compiler
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
@@ -362,7 +362,7 @@ jobs:
           repository: ${{ matrix.deployment.compiler_repo }}
           ref: ${{ matrix.deployment.compiler_ref }}
           path: checkout/compiler
-          token: ${{ secrets.FLEET_READ_TOKEN }}
+          token: ${{ startsWith(matrix.deployment.compiler_repo, 'ffreis-org/') && secrets.FLEET_READ_TOKEN_ORG || secrets.FLEET_READ_TOKEN_FFREIS }}
 
       - uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6.4.0
         with:
@@ -409,7 +409,7 @@ jobs:
           repository: ${{ matrix.deployment.shared_js_repo }}
           ref: ${{ matrix.deployment.shared_js_ref }}
           path: checkout/shared-js
-          token: ${{ secrets.FLEET_READ_TOKEN }}
+          token: ${{ startsWith(matrix.deployment.shared_js_repo, 'ffreis-org/') && secrets.FLEET_READ_TOKEN_ORG || secrets.FLEET_READ_TOKEN_FFREIS }}
 
       - name: Inject shared JS into website
         if: matrix.deployment.shared_js_repo != ''
@@ -425,7 +425,7 @@ jobs:
           repository: ${{ matrix.deployment.posts_repo }}
           ref: ${{ matrix.deployment.posts_ref }}
           path: checkout/posts
-          token: ${{ secrets.FLEET_READ_TOKEN }}
+          token: ${{ startsWith(matrix.deployment.posts_repo, 'ffreis-org/') && secrets.FLEET_READ_TOKEN_ORG || secrets.FLEET_READ_TOKEN_FFREIS }}
 
       - name: Checkout projects repo
         if: matrix.deployment.projects_repo != ''
@@ -434,7 +434,7 @@ jobs:
           repository: ${{ matrix.deployment.projects_repo }}
           ref: ${{ matrix.deployment.projects_ref }}
           path: checkout/projects
-          token: ${{ secrets.FLEET_READ_TOKEN }}
+          token: ${{ startsWith(matrix.deployment.projects_repo, 'ffreis-org/') && secrets.FLEET_READ_TOKEN_ORG || secrets.FLEET_READ_TOKEN_FFREIS }}
 
       - name: Checkout courses repo
         if: matrix.deployment.courses_repo != ''
@@ -443,7 +443,7 @@ jobs:
           repository: ${{ matrix.deployment.courses_repo }}
           ref: ${{ matrix.deployment.courses_ref }}
           path: checkout/courses
-          token: ${{ secrets.FLEET_READ_TOKEN }}
+          token: ${{ startsWith(matrix.deployment.courses_repo, 'ffreis-org/') && secrets.FLEET_READ_TOKEN_ORG || secrets.FLEET_READ_TOKEN_FFREIS }}
 
       - name: Build static site
         run: |

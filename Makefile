@@ -26,16 +26,17 @@ preview: ## Preview a website locally — WEBSITE=<name> required, PORT=8080 (de
 	@[[ -n "$(WEBSITE)" ]] || (echo "Usage: make preview WEBSITE=<name>"; echo ""; $(MAKE) list-websites; exit 1)
 	@bash ./scripts/preview.sh "$(WEBSITE)" "$(PORT)"
 
-lint: ## Lint GitHub Actions workflows with actionlint
-	@./scripts/hooks/check_required_tools.sh $(ACTIONLINT)
+lint: hook-scripts ## Lint GitHub Actions workflows with actionlint
+	@. ./scripts/hooks/check_required_tools.sh $(ACTIONLINT)
 	$(ACTIONLINT)
 
-secrets-scan-staged: ## Scan staged diff for secrets with gitleaks
-	@./scripts/hooks/check_required_tools.sh $(GITLEAKS)
+secrets-scan-staged: hook-scripts ## Scan staged diff for secrets with gitleaks
+	@. ./scripts/hooks/check_required_tools.sh $(GITLEAKS)
 	$(GITLEAKS) protect --staged --redact
 
 
-PLATFORM_STANDARDS_SHA := 3c787edb4e96ddea2e86b2add2c32139685e8db7  # v1.2.1
+# ffreis-platform-standards v1.2.1
+PLATFORM_STANDARDS_SHA := 3c787edb4e96ddea2e86b2add2c32139685e8db7
 PLATFORM_STANDARDS_RAW := https://raw.githubusercontent.com/FelipeFuhr/ffreis-platform-standards
 
 HOOK_SCRIPTS := \

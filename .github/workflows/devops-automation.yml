@@ -40,6 +40,7 @@ jobs:
     permissions:
       contents: write
       pull-requests: write
+      issues: write
     uses: FelipeFuhr/ffreis-workflows-general/.github/workflows/general-release-please.yml@0aa2f6932831848d438834938acefcd98bc05c42 # post-v1.6.0
     with:
       target-branch: "main"

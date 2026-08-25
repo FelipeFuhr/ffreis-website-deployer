@@ -114,6 +114,44 @@ extracts them from `top_compiler` and passes them as matrix outputs:
 `compiler_raster_inline_threshold`, `compiler_embed_fonts`, `compiler_inline_body_css`.
 The build step converts them into the matching compiler flags.
 
+## Two site archetypes: split template+data vs compiler-native
+
+The fleet has two shapes, and the deployer supports both. Which one a site is
+determines whether `sources.data` exists.
+
+**Split template+data** (`ffreis-website`, `flemming-website`, `petlook-website`,
+`casaboa-website`) — page copy lives in a separate `*-data` repo. The deployer
+checks it out and copies it into `checkout/website/src/data/`, and the compiler
+picks it up from that default location. No `-site-data` flag is involved.
+
+**Compiler-native single-repo** (`ffreis-urbs`, `ffreis-koe-website`) — the site
+keeps its own per-language data layer inside the website repo. There is no
+`sources.data` block. These sites MUST be built with an explicit
+`-site-data "<common>|<i18n>/<lang>"`, exactly as their own Makefiles do:
+
+```yaml
+sources:
+  website:
+    repo: ffreis-org/ffreis-urbs
+    ref: main
+    site_data:
+      common: src/data/common   # shared, language-independent layer
+      i18n:   src/data/i18n     # <i18n>/<deployment-name> is the language layer
+```
+
+`site_data.i18n` is joined with the **deployment name**, because for these sites
+a deployment *is* a language (`deployments: en:` / `pt:`) — the same fan-out the
+repos' own `for lang in $(LANGS)` loop performs. `-sibling-base-paths` was
+already derived from the other deployments' prefixes and needs no new config.
+
+Both keys are optional and default to empty; omitting them yields the previous
+behaviour exactly, so split-archetype sites are unaffected. If `site_data.i18n`
+is set but the resolved language directory is absent from the website repo, the
+build fails loudly rather than silently compiling an empty site.
+
+Note the validate step passes the same `-site-data`. Without it, `validate-site-data`
+would check the (absent) default `src/data/` tree and pass vacuously.
+
 ## Local deploy (`local/deploy-local.sh`) — the sanctioned local-first path
 
 When GitHub Actions is unavailable (e.g. the billing pause), deploy with

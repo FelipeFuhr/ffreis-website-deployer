@@ -95,6 +95,29 @@ mock either by a `/mock/` path segment or by a `.mock-content` marker file commi
 at the corpus root. The marker is what survives a directory rename, so the isolation
 does not rest on a path string alone.
 
+## Guard tests (`make test`)
+
+`tests/test_deploy_guards.py` covers the inventory guards in `deploy.yml`'s
+config step — the checks that reject `content_source: mock`, `include_drafts:
+true`, and a both-keys section config for a non-dev environment. They are the
+last thing between an inventory typo and a production deploy.
+
+The tests **extract the step from the workflow** and run it against fixture
+inventories with the same environment variables and a real `$GITHUB_OUTPUT`
+file, rather than testing a copy of the logic. A copy drifts, and then the tests
+pass while the shipped workflow is wrong. `TestExtractionIsNotVacuous` pins that
+the extraction actually found the guards, so an extraction that silently
+returned nothing cannot make every other test pass against an empty script.
+
+Both directions are covered: each rejected shape is asserted to fail *with the
+right message*, and each permitted shape is asserted to resolve *and produce the
+right compiler flags* — otherwise a guard that rejected everything would pass.
+Each guard was verified by removing it and confirming the matching test fails.
+
+Run with `make test` (stdlib `unittest`; needs PyYAML). CI runs it as the
+**Workflow Guard Tests** job, triggered by changes to `.github/workflows/**`,
+`Makefile`, `lefthook.yml`, or `tests/**`.
+
 ## Section gating (`enable_sections` / `disable_sections`)
 
 A site can hide whole content sections (`blog`, `courses`, `projects`). Which

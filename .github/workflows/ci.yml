@@ -9,12 +9,14 @@ on:
       - '.github/workflows/**'
       - 'Makefile'
       - 'lefthook.yml'
+      - 'tests/**'
   pull_request:
     types: [opened, synchronize, reopened, ready_for_review]
     paths:
       - '.github/workflows/**'
       - 'Makefile'
       - 'lefthook.yml'
+      - 'tests/**'
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -51,3 +53,33 @@ jobs:
 
       - name: Run actionlint
         run: actionlint
+
+  guard-tests:
+    if: ${{ github.event_name != 'pull_request' || github.event.pull_request.draft == false }}
+    timeout-minutes: 15
+    name: Workflow Guard Tests
+    permissions:
+      contents: read
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Harden the runner (Audit all outbound calls)
+        uses: step-security/harden-runner@a5ad31d6a139d249332a2605b85202e8c0b78450 # v2.19.1
+        with:
+          egress-policy: audit
+
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: '3.12'
+
+      - name: Install PyYAML
+        run: pip install pyyaml
+
+      # The inventory guards in deploy.yml are the last thing between an
+      # inventory typo and a production deploy. These tests extract that step
+      # from the workflow and run it against fixtures, so they exercise the
+      # shipped code rather than a copy that can drift.
+      - name: Run guard tests
+        run: make test

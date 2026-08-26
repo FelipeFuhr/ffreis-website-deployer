@@ -12,7 +12,7 @@ LEFTHOOK_VERSION ?= 1.7.10
 LEFTHOOK_DIR     ?= $(CURDIR)/.bin
 LEFTHOOK_BIN     ?= $(LEFTHOOK_DIR)/lefthook
 
-.PHONY: help preview list-websites \
+.PHONY: help preview list-websites test \
 	lint secrets-scan-staged lefthook-bootstrap lefthook-install lefthook-run lefthook
 
 help: ## Show available targets
@@ -25,6 +25,9 @@ list-websites: ## List available websites from the inventory
 preview: ## Preview a website locally — WEBSITE=<name> required, PORT=8080 (default)
 	@[[ -n "$(WEBSITE)" ]] || (echo "Usage: make preview WEBSITE=<name>"; echo ""; $(MAKE) list-websites; exit 1)
 	@bash ./scripts/preview.sh "$(WEBSITE)" "$(PORT)"
+
+test: ## Run the workflow guard tests (stdlib unittest; needs PyYAML)
+	python3 -m unittest discover -s tests -v
 
 lint: hook-scripts ## Lint GitHub Actions workflows with actionlint
 	@. ./scripts/hooks/check_required_tools.sh $(ACTIONLINT)

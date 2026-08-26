@@ -105,6 +105,8 @@ jobs:
           top_recaptcha = cfg.get("recaptcha_site_key", "")
           top_tracker   = cfg.get("tracker", {})
           top_content_source = cfg.get("content_source", "prod")
+          top_enable_sections = cfg.get("enable_sections", [])
+          top_include_drafts  = bool(cfg.get("include_drafts", False))
 
           # Anti-leak guard: content_source=mock is only allowed for dev environments.
           # This prevents an accidental prod inventory from baking in mock content.
@@ -113,6 +115,30 @@ jobs:
                   f"FATAL: content_source=mock is set in {path} but "
                   f"github_environment={top_env!r} is not a dev environment. "
                   "Mock content must never reach production.",
+                  file=sys.stderr,
+              )
+              sys.exit(1)
+
+          # Same guard, same reason: draft content is unfinished by definition.
+          # The compiler defaults -include-drafts off, so this only stops an
+          # inventory from deliberately turning it on outside dev.
+          if top_include_drafts and not top_env.endswith("-dev"):
+              print(
+                  f"FATAL: include_drafts is set in {path} but "
+                  f"github_environment={top_env!r} is not a dev environment. "
+                  "Draft content must never reach production.",
+                  file=sys.stderr,
+              )
+              sys.exit(1)
+
+          # enable_sections and disable_sections answer the same question in
+          # opposite directions; carrying both in one inventory is a config the
+          # reader cannot resolve at a glance, so reject it rather than pick.
+          if top_enable_sections and cfg.get("disable_sections"):
+              print(
+                  f"FATAL: {path} sets both enable_sections and disable_sections. "
+                  "Use enable_sections with a site that declares flags/flags.json "
+                  "(sections default off), or disable_sections with one that does not.",
                   file=sys.stderr,
               )
               sys.exit(1)
@@ -150,8 +176,13 @@ jobs:
                   "compiler_raster_inline_threshold":    str(top_compiler["raster_inline_threshold"]) if "raster_inline_threshold" in top_compiler else "",
                   "compiler_embed_fonts":                "true" if top_compiler.get("embed_fonts", False) else "",
                   "compiler_inline_body_css":            "true" if top_compiler.get("inline_body_css", False) else "",
-                  # Site-level list of sections to hide (blog/courses/projects); prod sets it, dev omits.
+                  # Site-level section gating. A site that declares flags/flags.json
+                  # has its sections default OFF and lists what to turn on here;
+                  # a site without a registry has them default ON and lists what to
+                  # hide. The two are mutually exclusive (validated above).
                   "disable_sections":                    ",".join(cfg.get("disable_sections", [])),
+                  "enable_sections":                     ",".join(top_enable_sections),
+                  "include_drafts":                      "true" if top_include_drafts else "",
                   "builds_bucket":    top_builds.get("bucket", ""),
                   "builds_region":    top_builds.get("region", "us-east-1"),
                   "publish_bucket":   d_pub.get("bucket", top_publish.get("bucket", "")),
@@ -518,6 +549,14 @@ jobs:
           if [[ -n "${{ matrix.deployment.disable_sections }}" ]]; then
             DISABLE_SECTIONS_ARGS=("-disable-sections" "${{ matrix.deployment.disable_sections }}")
           fi
+          ENABLE_SECTIONS_ARGS=()
+          if [[ -n "${{ matrix.deployment.enable_sections }}" ]]; then
+            ENABLE_SECTIONS_ARGS=("-enable-sections" "${{ matrix.deployment.enable_sections }}")
+          fi
+          INCLUDE_DRAFTS_ARGS=()
+          if [[ "${{ matrix.deployment.include_drafts }}" == "true" ]]; then
+            INCLUDE_DRAFTS_ARGS=("-include-drafts")
+          fi
           TRACKER_ARGS=()
           if [[ "${{ matrix.deployment.tracker_enabled }}" == "true" ]]; then
             TRACKER_ARGS=(
@@ -546,6 +585,8 @@ jobs:
             "${EMBED_FONTS_ARGS[@]}" \
             "${INLINE_BODY_CSS_ARGS[@]}" \
             "${DISABLE_SECTIONS_ARGS[@]}" \
+            "${ENABLE_SECTIONS_ARGS[@]}" \
+            "${INCLUDE_DRAFTS_ARGS[@]}" \
             "${TRACKER_ARGS[@]}"
 
       - name: Emit content bundle

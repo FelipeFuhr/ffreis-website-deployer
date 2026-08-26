@@ -90,7 +90,69 @@ a fatal error. The build step then swaps the content paths to `mock/` subdirecto
 - courses: `checkout/courses/mock/courses.yaml`
 
 It also passes `-content-source mock` to the compiler, which enforces the anti-leak
-guard at build time: the compiler rejects any `/mock/` path when not in mock mode.
+guard at build time: outside mock mode the compiler rejects content identified as
+mock either by a `/mock/` path segment or by a `.mock-content` marker file committed
+at the corpus root. The marker is what survives a directory rename, so the isolation
+does not rest on a path string alone.
+
+## Guard tests (`make test`)
+
+`tests/test_deploy_guards.py` covers the inventory guards in `deploy.yml`'s
+config step — the checks that reject `content_source: mock`, `include_drafts:
+true`, and a both-keys section config for a non-dev environment. They are the
+last thing between an inventory typo and a production deploy.
+
+The tests **extract the step from the workflow** and run it against fixture
+inventories with the same environment variables and a real `$GITHUB_OUTPUT`
+file, rather than testing a copy of the logic. A copy drifts, and then the tests
+pass while the shipped workflow is wrong. `TestExtractionIsNotVacuous` pins that
+the extraction actually found the guards, so an extraction that silently
+returned nothing cannot make every other test pass against an empty script.
+
+Both directions are covered: each rejected shape is asserted to fail *with the
+right message*, and each permitted shape is asserted to resolve *and produce the
+right compiler flags* — otherwise a guard that rejected everything would pass.
+Each guard was verified by removing it and confirming the matching test fails.
+
+Run with `make test` (stdlib `unittest`; needs PyYAML). CI runs it as the
+**Workflow Guard Tests** job, triggered by changes to `.github/workflows/**`,
+`Makefile`, `lefthook.yml`, or `tests/**`.
+
+## Section gating (`enable_sections` / `disable_sections`)
+
+A site can hide whole content sections (`blog`, `courses`, `projects`). Which
+direction the inventory expresses that in depends on whether the site declares a
+flag registry (`flags/flags.json` at its root):
+
+```yaml
+enable_sections: [blog, projects]   # registry site: sections default OFF, list what to turn on
+disable_sections: [blog, courses]   # legacy site:   sections default ON,  list what to hide
+```
+
+Setting **both** in one inventory is a fatal config error — they answer the same
+question in opposite directions and a reader cannot resolve the result at a glance.
+
+Prefer `enable_sections`. With a registry the safe state no longer requires
+configuration: a build that receives no section config falls back to the declared
+default, so an inventory key lost in a promote or a branch divergence cannot
+publish a not-ready section. Without a registry, losing `disable_sections` turns
+every section back on, which is the failure mode this exists to remove.
+
+## Draft content (`include_drafts`)
+
+```yaml
+include_drafts: true   # dev environments only
+```
+
+Passes `-include-drafts` to the compiler, admitting posts, projects and courses
+marked `draft: true`. The `config` job validates it exactly the way it validates
+`content_source: mock` — set on a `github_environment` that does not end in `-dev`
+is a fatal error. The compiler already defaults it off, so this guard exists to
+stop an inventory from deliberately turning it on outside dev.
+
+Drafts and mock content are different things and should not be conflated: mock
+content is generated filler that is structurally isolated in a `mock/` tree, while
+a draft is real, unfinished content sitting in the normal corpus.
 
 ## Compiler embedding flags in inventory YAML
 

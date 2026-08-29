@@ -140,6 +140,11 @@ def resolve(name, dep):
         "courses_ref": src.get("courses", {}).get("ref", top_courses.get("ref", "main")),
         "shared_js_repo": top_shared.get("repo", ""),
         "shared_js_ref": top_shared.get("ref", "main"),
+        # Compiler-native single-repo sites: data lives in the website repo's
+        # own layers, so the build needs an explicit -site-data override.
+        # Empty for the split template+data archetype. Mirrors deploy.yml.
+        "site_data_common": top_website.get("site_data", {}).get("common", ""),
+        "site_data_i18n": top_website.get("site_data", {}).get("i18n", ""),
         "compiler_repo": top_compiler.get("repo", ""),
         "compiler_ref": top_compiler.get("ref", "main"),
         "js_inline": str(top_compiler.get("js_inline_threshold", "")),
@@ -167,7 +172,7 @@ cols = ["name","website_repo","website_ref","data_repo","data_ref","data_subpath
         "shared_js_repo","shared_js_ref","compiler_repo","compiler_ref",
         "js_inline","js_shared_inline","raster_inline","embed_fonts","inline_body_css",
         "publish_bucket","publish_prefix","publish_region","cf_paths","sibling_prefixes",
-        "disable_sections"]
+        "disable_sections","site_data_common","site_data_i18n"]
 for d in deps:
     if only and d["name"] != only:
         continue
@@ -265,7 +270,8 @@ build_one() {
         compiler_repo="${15}" compiler_ref="${16}" js_inline="${17}" js_shared_inline="${18}" \
         raster_inline="${19}" embed_fonts="${20}" inline_body_css="${21}" \
         publish_bucket="${22}" publish_prefix="${23}" publish_region="${24}" \
-        cf_paths="${25}" sibling_prefixes="${26}" disable_sections="${27:-}"
+        cf_paths="${25}" sibling_prefixes="${26}" disable_sections="${27:-}" \
+        site_data_common="${28:-}" site_data_i18n="${29:-}"
 
   echo "── build deployment: $name ──────────────────────────────────────────────"
   local work="$BUILD_ROOT/$name"
@@ -299,6 +305,25 @@ build_one() {
 
   # Assemble compiler flags exactly like deploy.yml.
   local -a args=(-website-root "$co/website" -out "$dist" -clean-urls)
+  # Compiler-native single-repo sites. Paths must be absolute: build-static is
+  # invoked below with CWD=$co/compiler, and the compiler resolves -site-data
+  # parts against its own CWD, not against -website-root.
+  if [[ -n "$site_data_i18n" ]]; then
+    local sd_lang_dir="${site_data_i18n%/}/$name"
+    if [[ ! -d "$co/website/$sd_lang_dir" ]]; then
+      echo "  ✗ site_data.i18n is set but $sd_lang_dir is absent from the website repo" >&2
+      return 1
+    fi
+    if [[ -n "$site_data_common" ]]; then
+      if [[ ! -d "$co/website/${site_data_common%/}" ]]; then
+        echo "  ✗ site_data.common is set but ${site_data_common%/} is absent from the website repo" >&2
+        return 1
+      fi
+      args+=(-site-data "$co/website/${site_data_common%/}|$co/website/$sd_lang_dir")
+    else
+      args+=(-site-data "$co/website/$sd_lang_dir")
+    fi
+  fi
   [[ -n "$posts_repo"    && -d "$co/posts/posts" ]]          && args+=(-posts-dir "$co/posts/posts")
   [[ -n "$projects_repo" && -f "$co/projects/projects.yaml" ]] && args+=(-projects-file "$co/projects/projects.yaml")
   [[ -n "$courses_repo"  && -f "$co/courses/courses.yaml" ]]   && args+=(-courses-file "$co/courses/courses.yaml")

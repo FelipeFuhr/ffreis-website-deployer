@@ -146,11 +146,38 @@ already derived from the other deployments' prefixes and needs no new config.
 
 Both keys are optional and default to empty; omitting them yields the previous
 behaviour exactly, so split-archetype sites are unaffected. If `site_data.i18n`
-is set but the resolved language directory is absent from the website repo, the
-build fails loudly rather than silently compiling an empty site.
+is set but the resolved language directory is absent from the website repo, both
+the validate and the build step fail loudly rather than silently compiling an
+empty site.
 
 Note the validate step passes the same `-site-data`. Without it, `validate-site-data`
 would check the (absent) default `src/data/` tree and pass vacuously.
+
+### The paths handed to the compiler MUST be absolute
+
+The inventory stores `site_data` paths **relative to the website repo root**
+(`src/data/common`), but the workflow must prefix each `|`-separated part with
+`$GITHUB_WORKSPACE/checkout/website/` before passing it on. This is not
+cosmetic:
+
+* Both compiler entrypoints are invoked as `go -C <compiler-dir> run …`, which
+  makes the compiler process' working directory the *compiler* checkout — not
+  the workspace root, and not `-website-root`.
+* `-site-data` is resolved against that working directory, independently of
+  `-website-root`: `sitegen.loadLayersFromSource` splits the value on `|` and
+  `os.ReadDir`s each part verbatim (`loadMultiDirSource`).
+
+A repo-relative value therefore resolves under `checkout/compiler/` and the job
+dies with `loading site data: open src/data/common: no such file or directory`.
+`ffreis-urbs`'s own Makefile gets away with relative paths only because it runs
+the compiler with `-website-root .` from the repo root.
+
+Keep the existence guards (`[[ -d "${WEBSITE_ROOT}/…" ]]`) and the flag value
+rooted at the same `WEBSITE_ROOT`, or the guard will check one path while the
+compiler reads another.
+
+`local/deploy-local.sh` carries the same support and the same absolute-path
+requirement — it also runs the compiler with `cd "$co/compiler"`.
 
 ## Local deploy (`local/deploy-local.sh`) — the sanctioned local-first path
 

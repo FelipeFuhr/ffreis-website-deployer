@@ -143,6 +143,13 @@ jobs:
                   "projects_ref":     d_prj.get("ref",  top_projects.get("ref",  "main")),
                   "courses_repo":     d_crs.get("repo", top_courses.get("repo", "")),
                   "courses_ref":      d_crs.get("ref",  top_courses.get("ref",  "main")),
+                  # Compiler-native single-repo sites (ffreis-urbs, ffreis-koe-website)
+                  # keep their page copy in their OWN per-language data layer instead
+                  # of a separate *-data repo, and must be built with an explicit
+                  # -site-data "<common>|<i18n>/<lang>". Empty for the split
+                  # template+data archetype, which injects data into src/data/ instead.
+                  "site_data_common": top_website.get("site_data", {}).get("common", ""),
+                  "site_data_i18n":   top_website.get("site_data", {}).get("i18n", ""),
                   "compiler_repo":    top_compiler.get("repo", ""),
                   "compiler_ref":     top_compiler.get("ref", "main"),
                   "compiler_js_inline_threshold":        str(top_compiler["js_inline_threshold"]) if "js_inline_threshold" in top_compiler else "",
@@ -312,9 +319,41 @@ jobs:
       - name: Validate site data against contract
         run: |
           set -euo pipefail
+          # Compiler-native sites keep their data in their own per-language
+          # layers, so validation needs the same -site-data the build uses;
+          # without it the compiler would validate the (absent) default
+          # src/data/ tree and this gate would pass vacuously.
+          #
+          # The paths MUST be absolute. `go -C <compiler-dir> run` makes the
+          # compiler process' CWD the compiler checkout, not the workspace, and
+          # the compiler resolves -site-data entries relative to its own CWD
+          # (sitegen.loadMultiDirSource -> os.ReadDir on each `|`-separated
+          # part). A repo-relative value would resolve under checkout/compiler/
+          # and die with "open src/data/common: no such file or directory".
+          WEBSITE_ROOT="$GITHUB_WORKSPACE/checkout/website"
+          SD_ARGS=()
+          SD_COMMON="${{ matrix.deployment.site_data_common }}"
+          SD_I18N="${{ matrix.deployment.site_data_i18n }}"
+          if [[ -n "$SD_I18N" ]]; then
+            SD_LANG_DIR="${SD_I18N%/}/${{ matrix.deployment.name }}"
+            if [[ ! -d "${WEBSITE_ROOT}/${SD_LANG_DIR}" ]]; then
+              echo "site_data.i18n is set but ${SD_LANG_DIR} is absent from the website repo" >&2
+              exit 1
+            fi
+            if [[ -n "$SD_COMMON" ]]; then
+              if [[ ! -d "${WEBSITE_ROOT}/${SD_COMMON%/}" ]]; then
+                echo "site_data.common is set but ${SD_COMMON%/} is absent from the website repo" >&2
+                exit 1
+              fi
+              SD_ARGS=("-site-data" "${WEBSITE_ROOT}/${SD_COMMON%/}|${WEBSITE_ROOT}/${SD_LANG_DIR}")
+            else
+              SD_ARGS=("-site-data" "${WEBSITE_ROOT}/${SD_LANG_DIR}")
+            fi
+          fi
           go -C "${{ steps.compiler.outputs.dir }}" run ./cmd/website-compiler \
             validate-site-data \
-            -website-root "$GITHUB_WORKSPACE/checkout/website"
+            -website-root "$WEBSITE_ROOT" \
+            "${SD_ARGS[@]}"
 
   # ── build ─────────────────────────────────────────────────────────────────
   build:
@@ -489,6 +528,33 @@ jobs:
             CONTENT_SOURCE_ARGS=("-content-source" "mock")
             DEV_DATA_ARGS=("-dev-data")
           fi
+          # Compiler-native sites resolve their data from this repo's own layers.
+          # The deployment name IS the language (deployments: en:, pt:), matching
+          # the per-language loop in those repos' own Makefiles.
+          #
+          # Absolute paths are required: `go -C <compiler-dir> run` puts the
+          # compiler's CWD in checkout/compiler, and -site-data parts are
+          # resolved against that CWD, not against -website-root.
+          WEBSITE_ROOT="$GITHUB_WORKSPACE/checkout/website"
+          SITE_DATA_ARGS=()
+          SD_COMMON="${{ matrix.deployment.site_data_common }}"
+          SD_I18N="${{ matrix.deployment.site_data_i18n }}"
+          if [[ -n "$SD_I18N" ]]; then
+            SD_LANG_DIR="${SD_I18N%/}/${{ matrix.deployment.name }}"
+            if [[ ! -d "${WEBSITE_ROOT}/${SD_LANG_DIR}" ]]; then
+              echo "site_data.i18n is set but ${SD_LANG_DIR} is absent from the website repo" >&2
+              exit 1
+            fi
+            if [[ -n "$SD_COMMON" ]]; then
+              if [[ ! -d "${WEBSITE_ROOT}/${SD_COMMON%/}" ]]; then
+                echo "site_data.common is set but ${SD_COMMON%/} is absent from the website repo" >&2
+                exit 1
+              fi
+              SITE_DATA_ARGS=("-site-data" "${WEBSITE_ROOT}/${SD_COMMON%/}|${WEBSITE_ROOT}/${SD_LANG_DIR}")
+            else
+              SITE_DATA_ARGS=("-site-data" "${WEBSITE_ROOT}/${SD_LANG_DIR}")
+            fi
+          fi
           SIBLING_ARGS=()
           SIBLING_PREFIXES="${{ matrix.deployment.sibling_prefixes }}"
           if [[ -n "$SIBLING_PREFIXES" ]]; then
@@ -534,6 +600,7 @@ jobs:
             -website-root "$GITHUB_WORKSPACE/checkout/website" \
             -out "$GITHUB_WORKSPACE/dist" \
             -clean-urls \
+            "${SITE_DATA_ARGS[@]}" \
             "${CONTENT_SOURCE_ARGS[@]}" \
             "${DEV_DATA_ARGS[@]}" \
             "${POSTS_ARGS[@]}" \

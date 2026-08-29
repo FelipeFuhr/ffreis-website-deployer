@@ -1,0 +1,23 @@
+[extend]
+useDefault = true
+
+[allowlist]
+# local/deploy-local.sh embeds a KNOWN-BROKEN, Google-rejected reCAPTCHA v3
+# SITE key (public by design, not a secret) as the literal comparison target
+# for guard_recaptcha_key — a guard that refuses to publish any build whose
+# HTML embeds this exact broken key (see git log on this file, PR #74/#83,
+# for the incident it prevents a regression of: it broke ffreis.com
+# chat/forms on 2026-06-29). The string must be present verbatim in source
+# for the guard to work at all — there is no way to "fix" this finding by
+# changing the code.
+#
+# Path-scoped, not rule-scoped: this workspace's installed gitleaks build
+# does not correctly scope an allowlist to a single rule ([rules.allowlist]
+# and [[allowlists]] targetRules are both no-ops in this build — see
+# feedback-gitleaks-allowlist-scoping memory). Only a whole-path exemption
+# actually suppresses. Accepted trade-off, consciously: this exempts ALL
+# rule types within this one file, not just generic-api-key. deploy-local.sh
+# is a local dev-only shell script; a real secret has no reason to live here.
+paths = [
+  '''local/deploy-local\.sh''',
+]

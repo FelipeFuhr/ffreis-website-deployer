@@ -152,6 +152,11 @@ jobs:
                   "site_data_i18n":   top_website.get("site_data", {}).get("i18n", ""),
                   "compiler_repo":    top_compiler.get("repo", ""),
                   "compiler_ref":     top_compiler.get("ref", "main"),
+                  # Every existing site's templates assume clean URLs (the historical,
+                  # unconditional default), so this only turns OFF -clean-urls, and only
+                  # when a site's own templates use flat .html-style hrefs instead (e.g.
+                  # forma-dev — see its inventory entry for why).
+                  "compiler_clean_urls": "" if top_compiler.get("clean_urls", True) is False else "true",
                   "compiler_js_inline_threshold":        str(top_compiler["js_inline_threshold"]) if "js_inline_threshold" in top_compiler else "",
                   "compiler_js_shared_inline_threshold": str(top_compiler["js_shared_inline_threshold"]) if "js_shared_inline_threshold" in top_compiler else "",
                   "compiler_raster_inline_threshold":    str(top_compiler["raster_inline_threshold"]) if "raster_inline_threshold" in top_compiler else "",
@@ -572,6 +577,10 @@ jobs:
           if [[ -n "${{ matrix.deployment.compiler_raster_inline_threshold }}" ]]; then
             RASTER_INLINE_ARGS=("-raster-inline-threshold" "${{ matrix.deployment.compiler_raster_inline_threshold }}")
           fi
+          CLEAN_URLS_ARGS=()
+          if [[ "${{ matrix.deployment.compiler_clean_urls }}" == "true" ]]; then
+            CLEAN_URLS_ARGS=("-clean-urls")
+          fi
           EMBED_FONTS_ARGS=()
           if [[ "${{ matrix.deployment.compiler_embed_fonts }}" == "true" ]]; then
             EMBED_FONTS_ARGS=("-embed-fonts")
@@ -599,7 +608,7 @@ jobs:
           go -C "${{ steps.compiler.outputs.dir }}" run ./cmd/build-static \
             -website-root "$GITHUB_WORKSPACE/checkout/website" \
             -out "$GITHUB_WORKSPACE/dist" \
-            -clean-urls \
+            "${CLEAN_URLS_ARGS[@]}" \
             "${SITE_DATA_ARGS[@]}" \
             "${CONTENT_SOURCE_ARGS[@]}" \
             "${DEV_DATA_ARGS[@]}" \

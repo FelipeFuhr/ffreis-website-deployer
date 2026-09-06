@@ -1,0 +1,151 @@
+name: Promote Compiler
+
+# The ONLY workflow allowed to move FelipeFuhr/ffreis-website-compiler's
+# `stable` branch — the fleet's last-known-good compiler pointer. Runs the
+# fleet-wide verify-compiler.yml build first; only force-updates `stable`
+# when every enumerated site built successfully. See AGENTS.md "Compiler
+# promotion / stable pointer" for the rollback procedure.
+
+permissions: {}
+
+on:
+  workflow_dispatch:
+    inputs:
+      compiler_ref:
+        description: 'Compiler ref (branch, tag, or SHA) to verify and promote to stable'
+        required: false
+        default: 'main'
+        type: string
+      dry_run:
+        description: 'Verify only — do not move the stable branch'
+        required: false
+        default: false
+        type: boolean
+
+concurrency:
+  # A single promotion lane: never run two stable-branch moves concurrently.
+  group: promote-compiler
+  cancel-in-progress: false
+
+jobs:
+  # ── verify ────────────────────────────────────────────────────────────────
+  verify:
+    name: Verify Fleet Build
+    uses: ./.github/workflows/verify-compiler.yml
+    with:
+      compiler_ref: ${{ inputs.compiler_ref }}
+    secrets: inherit
+
+  # ── promote ───────────────────────────────────────────────────────────────
+  # Only runs when verification passed AND this isn't a dry run. Moves
+  # `stable` via the Git References API (server-side ref update against a SHA
+  # that already exists in the compiler repo) rather than a local git push —
+  # no checkout of the compiler repo is needed at all.
+  promote:
+    name: Move stable pointer
+    needs: verify
+    if: ${{ needs.verify.outputs.all_green == 'true' && inputs.dry_run == false }}
+    timeout-minutes: 15
+    runs-on: ubuntu-latest
+    permissions: {}
+
+    steps:
+      - name: Harden the runner (Audit all outbound calls)
+        if: ${{ !env.ACT }} # harden-runner can't run under act/podman; runs on real GitHub only
+        uses: step-security/harden-runner@a5ad31d6a139d249332a2605b85202e8c0b78450 # v2.19.1
+        with:
+          egress-policy: audit
+
+      - name: Resolve candidate ref to a SHA
+        id: resolve
+        env:
+          COMPILER_REF: ${{ inputs.compiler_ref }}
+        run: |
+          set -euo pipefail
+          # git ls-remote resolves a branch/tag name against the (public)
+          # compiler repo without needing any credentials or a local checkout.
+          SHA="$(git ls-remote https://github.com/FelipeFuhr/ffreis-website-compiler.git "$COMPILER_REF" | cut -f1)"
+          if [[ -z "$SHA" ]]; then
+            # ls-remote only resolves refs, not arbitrary commit SHAs. If the
+            # input already looks like a SHA, trust it as-is.
+            if [[ "$COMPILER_REF" =~ ^[0-9a-f]{7,40}$ ]]; then
+              SHA="$COMPILER_REF"
+            else
+              echo "Could not resolve '$COMPILER_REF' to a SHA via git ls-remote (not a known branch/tag, and not SHA-shaped)." >&2
+              exit 1
+            fi
+          fi
+          echo "sha=$SHA" >> "$GITHUB_OUTPUT"
+
+      - name: Force-move stable to resolved SHA
+        env:
+          # This job needs a PAT with write access to
+          # FelipeFuhr/ffreis-website-compiler — the default GITHUB_TOKEN
+          # cannot push/update refs on a different repository. See AGENTS.md
+          # "Compiler promotion / stable pointer" for how to provision it.
+          GH_TOKEN: ${{ secrets.COMPILER_PROMOTE_TOKEN }}
+          SHA: ${{ steps.resolve.outputs.sha }}
+        run: |
+          set -euo pipefail
+          if [[ -z "${GH_TOKEN:-}" ]]; then
+            echo "COMPILER_PROMOTE_TOKEN secret is not set on this repo." >&2
+            echo "See AGENTS.md 'Compiler promotion / stable pointer' for the manual PAT-creation step." >&2
+            exit 1
+          fi
+          gh api --method PATCH repos/FelipeFuhr/ffreis-website-compiler/git/refs/heads/stable \
+            -f sha="$SHA" -F force=true
+
+      - name: Write promotion record
+        if: always()
+        env:
+          COMPILER_REF: ${{ inputs.compiler_ref }}
+          SHA: ${{ steps.resolve.outputs.sha }}
+        run: |
+          {
+            echo "## Compiler promotion"
+            echo ""
+            echo "| field | value |"
+            echo "|---|---|"
+            echo "| candidate ref | \`${COMPILER_REF}\` |"
+            echo "| resolved SHA | \`${SHA:-unresolved}\` |"
+            echo "| promoted at (UTC) | $(date -u +%Y-%m-%dT%H:%M:%SZ) |"
+            echo "| dry run | false |"
+            echo ""
+            echo "\`stable\` now points at \`${SHA:-unresolved}\`. Full per-site build matrix is in the"
+            echo "Verify Fleet Build job's summary above."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  # ── dry-run report ────────────────────────────────────────────────────────
+  dry-run-report:
+    name: Dry-run summary (no promotion)
+    needs: verify
+    # always() so this still reports "not promoted" even when verification
+    # itself found a broken candidate (a job's `if:` is otherwise implicitly
+    # ANDed with success() of its needs, which would silently skip this).
+    if: ${{ always() && inputs.dry_run == true }}
+    timeout-minutes: 5
+    runs-on: ubuntu-latest
+    permissions: {}
+
+    steps:
+      - name: Report
+        env:
+          COMPILER_REF: ${{ inputs.compiler_ref }}
+          ALL_GREEN: ${{ needs.verify.outputs.all_green }}
+        run: |
+          {
+            echo "## Dry run — stable NOT moved"
+            echo ""
+            echo "candidate ref: \`${COMPILER_REF}\`  ·  all_green: \`${ALL_GREEN}\`"
+            echo ""
+            echo "Re-run with \`dry_run: false\` to promote once you're satisfied with the"
+            echo "Verify Fleet Build results above."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  # ── verification-failed report ───────────────────────────────────────────
+  # Placeholder for the "fix it, don't just note it" gap: today a red matrix
+  # only shows up as a failed workflow run (see the build job's own
+  # conclusion) plus the per-site table in the Verify Fleet Build summary.
+  # Follow-up: auto-open an issue on the compiler repo when all_green=false,
+  # tagging the failing site(s) and the candidate ref, so a broken candidate
+  # gets a persistent, assignable record instead of only a CI run link.

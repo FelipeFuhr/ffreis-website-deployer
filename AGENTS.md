@@ -119,8 +119,7 @@ The build step converts them into the matching compiler flags.
 The fleet has two shapes, and the deployer supports both. Which one a site is
 determines whether `sources.data` exists.
 
-**Split template+data** (`ffreis-website`, `flemming-website`, `petlook-website`,
-`casaboa-website`) — page copy lives in a separate `*-data` repo. The deployer
+**Split template+data** (`ffreis-website`, `flemming-website`, `petlook-website`) — page copy lives in a separate `*-data` repo. The deployer
 checks it out and copies it into `checkout/website/src/data/`, and the compiler
 picks it up from that default location. No `-site-data` flag is involved.
 

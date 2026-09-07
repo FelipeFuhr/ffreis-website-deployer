@@ -147,6 +147,11 @@ def resolve(name, dep):
         "site_data_i18n": top_website.get("site_data", {}).get("i18n", ""),
         "compiler_repo": top_compiler.get("repo", ""),
         "compiler_ref": top_compiler.get("ref", "main"),
+        # Every existing site's templates assume clean URLs (the historical,
+        # unconditional default), so this only turns OFF -clean-urls, and only
+        # when a site's own templates use flat .html-style hrefs instead (e.g.
+        # forma-dev — see its inventory entry for why). Mirrors deploy.yml.
+        "clean_urls": "" if top_compiler.get("clean_urls", True) is False else "true",
         "js_inline": str(top_compiler.get("js_inline_threshold", "")),
         "js_shared_inline": str(top_compiler.get("js_shared_inline_threshold", "")),
         "raster_inline": str(top_compiler.get("raster_inline_threshold", "")),
@@ -169,7 +174,7 @@ for d in deps:
 
 cols = ["name","website_repo","website_ref","data_repo","data_ref","data_subpath",
         "posts_repo","posts_ref","projects_repo","projects_ref","courses_repo","courses_ref",
-        "shared_js_repo","shared_js_ref","compiler_repo","compiler_ref",
+        "shared_js_repo","shared_js_ref","compiler_repo","compiler_ref","clean_urls",
         "js_inline","js_shared_inline","raster_inline","embed_fonts","inline_body_css",
         "publish_bucket","publish_prefix","publish_region","cf_paths","sibling_prefixes",
         "disable_sections","site_data_common","site_data_i18n"]
@@ -267,11 +272,11 @@ build_one() {
   local name="$1" website_repo="$2" website_ref="$3" data_repo="$4" data_ref="$5" \
         data_subpath="$6" posts_repo="$7" posts_ref="$8" projects_repo="$9" projects_ref="${10}" \
         courses_repo="${11}" courses_ref="${12}" shared_js_repo="${13}" shared_js_ref="${14}" \
-        compiler_repo="${15}" compiler_ref="${16}" js_inline="${17}" js_shared_inline="${18}" \
-        raster_inline="${19}" embed_fonts="${20}" inline_body_css="${21}" \
-        publish_bucket="${22}" publish_prefix="${23}" publish_region="${24}" \
-        cf_paths="${25}" sibling_prefixes="${26}" disable_sections="${27:-}" \
-        site_data_common="${28:-}" site_data_i18n="${29:-}"
+        compiler_repo="${15}" compiler_ref="${16}" clean_urls="${17}" js_inline="${18}" \
+        js_shared_inline="${19}" raster_inline="${20}" embed_fonts="${21}" inline_body_css="${22}" \
+        publish_bucket="${23}" publish_prefix="${24}" publish_region="${25}" \
+        cf_paths="${26}" sibling_prefixes="${27}" disable_sections="${28:-}" \
+        site_data_common="${29:-}" site_data_i18n="${30:-}"
 
   echo "── build deployment: $name ──────────────────────────────────────────────"
   local work="$BUILD_ROOT/$name"
@@ -304,7 +309,8 @@ build_one() {
   fi
 
   # Assemble compiler flags exactly like deploy.yml.
-  local -a args=(-website-root "$co/website" -out "$dist" -clean-urls)
+  local -a args=(-website-root "$co/website" -out "$dist")
+  [[ "$clean_urls" == "true" ]] && args+=(-clean-urls)
   # Compiler-native single-repo sites. Paths must be absolute: build-static is
   # invoked below with CWD=$co/compiler, and the compiler resolves -site-data
   # parts against its own CWD, not against -website-root.
@@ -360,7 +366,7 @@ build_one() {
 }
 
 while IFS=$'\x1f' read -r -a F; do
-  [[ ${#F[@]} -ge 26 ]] || continue   # skip any blank line
+  [[ ${#F[@]} -ge 27 ]] || continue   # skip any blank line
   build_one "${F[@]}"
 done <<< "$DEPLOYMENTS_TSV"
 

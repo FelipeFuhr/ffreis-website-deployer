@@ -208,6 +208,68 @@ CF_DISTRIBUTION_ID=<id> local/deploy-local.sh ffreis --deploy --yes-prod   # pub
 - This is a `-content-source prod` build; it does not enable the `mock/` content
   system (see "Content source selection"). The two guards are independent.
 
+## Compiler promotion / stable pointer
+
+`FelipeFuhr/ffreis-website-compiler` carries a `stable` branch — the fleet's
+**last-known-good** compiler pointer. Every site's `compiler.ref` is intended
+to track `stable` (not `main`), so a compiler regression on `main` never
+propagates to production builds by itself: `stable` only moves when a human
+explicitly promotes a candidate, and only after every fleet site has been
+proven to build against it.
+
+**`promote-compiler.yml` is the only workflow allowed to move `stable`.**
+Never force-push `stable` by hand — it bypasses the fleet-wide verification
+build and defeats the entire point of having a last-known-good pointer.
+
+- `verify-compiler.yml` — BUILD-ONLY fleet verification matrix (no AWS
+  credentials, no S3, no deploy). Enumerates every non-retired inventory site
+  (same `type:`/`retired:`/website-repo-presence rules as `watch.yml` and the
+  inventory repo's `scripts/check_quality_gate_wiring.py`), builds each one
+  with the candidate compiler ref, and reports a per-site pass/fail table plus
+  an `all_green` output. Callable directly via `workflow_dispatch` for an
+  ad-hoc "does this candidate build everywhere" check, or via `workflow_call`
+  from `promote-compiler.yml`.
+- `promote-compiler.yml` — runs `verify-compiler.yml`, and only when every
+  site came back green (and `dry_run` is `false`) force-updates `stable` to
+  the candidate's resolved SHA via the Git References API. A failed or partial
+  verification simply never reaches the promote job — the failing run itself,
+  with its per-site matrix, **is** the alert for now (see the in-repo
+  follow-up note in `promote-compiler.yml` about auto-filing an issue on the
+  compiler repo instead).
+
+### Running a promotion
+
+```
+gh workflow run promote-compiler.yml -R FelipeFuhr/ffreis-website-deployer \
+  -f compiler_ref=main -f dry_run=false
+```
+
+- `compiler_ref` defaults to `main` — pass a specific branch/tag/SHA to
+  promote something else.
+- Set `dry_run=true` to run the fleet verification without moving `stable`
+  (useful to check a candidate before committing to it).
+- Requires the `COMPILER_PROMOTE_TOKEN` repo secret: a fine-grained PAT scoped
+  to the `FelipeFuhr` account with **Contents: Read and write** on
+  `ffreis-website-compiler` (that repo only — do not grant it fleet-wide
+  access). The default `GITHUB_TOKEN` cannot push to a different repository,
+  and the broader `FLEET_WRITE_TOKEN_FFREIS` already used elsewhere in this
+  repo is deliberately NOT reused here to keep this high-consequence action on
+  its own narrowly-scoped credential. Provision with:
+  ```
+  gh secret set COMPILER_PROMOTE_TOKEN -R FelipeFuhr/ffreis-website-deployer
+  ```
+  (paste the PAT to stdin — never pass `--body -`, see
+  `feedback_gh_secret_set_body_dash_bug` in auto-memory).
+
+### Rolling back
+
+There is no separate "rollback" workflow — a rollback is just another
+promotion. Re-run `promote-compiler.yml` with `compiler_ref` set to the older
+known-good SHA/tag (e.g. the previous `stable` SHA, findable via
+`gh api repos/FelipeFuhr/ffreis-website-compiler/git/refs/heads/stable` history
+or the promotion record left in each run's step summary). It goes through the
+same fleet verification as any other promotion before `stable` moves.
+
 ## Keeping this file current
 
 - **If you discover a fact not reflected here:** add it before finishing your task.

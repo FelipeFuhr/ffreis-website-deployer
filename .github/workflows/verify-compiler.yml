@@ -1,0 +1,553 @@
+name: Verify Compiler
+
+# Fleet-wide verification build: compiles EVERY non-retired fleet site with a
+# candidate compiler ref, with no AWS credentials and no deploy step. Used by
+# promote-compiler.yml as the gate before moving the compiler's `stable`
+# branch (the fleet's last-known-good pointer) — see AGENTS.md "Compiler
+# promotion / stable pointer".
+#
+# Callable directly (workflow_dispatch) for ad-hoc "does this candidate build
+# everywhere" checks, and via workflow_call from promote-compiler.yml.
+
+permissions: {}
+
+on:
+  workflow_call:
+    inputs:
+      compiler_ref:
+        description: 'Compiler ref (branch, tag, or SHA) to build every fleet site against'
+        required: true
+        type: string
+    outputs:
+      all_green:
+        description: '"true" if every enumerated site built successfully at compiler_ref, else "false"'
+        value: ${{ jobs.report.outputs.all_green }}
+  workflow_dispatch:
+    inputs:
+      compiler_ref:
+        description: 'Compiler ref (branch, tag, or SHA) to build every fleet site against'
+        required: true
+        type: string
+
+concurrency:
+  # Distinct "verify-compiler" infix so this never collides with a caller's
+  # own ${{ github.workflow }}-${{ github.ref }} group when invoked via
+  # workflow_call from promote-compiler.yml.
+  group: verify-compiler-${{ inputs.compiler_ref }}
+  cancel-in-progress: true
+
+jobs:
+  # ── enumerate ─────────────────────────────────────────────────────────────
+  # Reads every non-retired inventory YAML and flattens it into one matrix of
+  # (site, deployment) build entries. Mirrors the exact skip rules used by
+  # watch.yml (type / website presence) and the inventory repo's
+  # scripts/check_quality_gate_wiring.py (adds the retired + website-repo
+  # presence checks), so "non-retired site" means the same thing everywhere
+  # in the fleet.
+  enumerate:
+    timeout-minutes: 15
+    name: Enumerate Fleet Sites
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      matrix: ${{ steps.build_matrix.outputs.matrix }}
+      site_count: ${{ steps.build_matrix.outputs.site_count }}
+
+    steps:
+      - name: Harden the runner (Audit all outbound calls)
+        if: ${{ !env.ACT }} # harden-runner can't run under act/podman; runs on real GitHub only
+        uses: step-security/harden-runner@a5ad31d6a139d249332a2605b85202e8c0b78450 # v2.19.1
+        with:
+          egress-policy: audit
+
+      # Checkout + token selection copied verbatim from deploy.yml's "Checkout
+      # websites-inventory" step (config job) — the inventory repo can live
+      # under either fleet owner, and a single fine-grained PAT can only cover
+      # one owner, hence the startsWith() split.
+      - name: Checkout websites-inventory
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          repository: ${{ vars.INVENTORY_REPO || format('{0}/websites-inventory', github.repository_owner) }}
+          token: ${{ startsWith(vars.INVENTORY_REPO || format('{0}/websites-inventory', github.repository_owner), 'ffreis-org/') && secrets.FLEET_READ_TOKEN_ORG || secrets.FLEET_READ_TOKEN_FFREIS }}
+
+      - name: Build fleet matrix
+        id: build_matrix
+        run: |
+          set -euo pipefail
+          python3 - <<'PYEOF'
+          import glob, json, os, re, sys
+          import yaml
+
+          def resolve(site_name, dep_name, dep_cfg, top):
+              """Mirror deploy.yml's config-job resolve(), scoped to the fields
+              a BUILD-ONLY compile needs (no publish/bucket/CF/env/smoke fields
+              — those are deploy-only and irrelevant to compiler verification)."""
+              d_src = dep_cfg.get("sources", {})
+              return {
+                  "website_repo":     top["website"].get("repo", ""),
+                  "website_ref":      d_src.get("website", {}).get("ref", top["website"].get("ref", "main")),
+                  "data_repo":        top["data"].get("repo", ""),
+                  "data_ref":         d_src.get("data", {}).get("ref", top["data"].get("ref", "main")),
+                  "data_subpath":     d_src.get("data", {}).get("subpath", top["data"].get("subpath", "")),
+                  "posts_repo":       d_src.get("posts", {}).get("repo", top["posts"].get("repo", "")),
+                  "posts_ref":        d_src.get("posts", {}).get("ref",  top["posts"].get("ref",  "main")),
+                  "projects_repo":    d_src.get("projects", {}).get("repo", top["projects"].get("repo", "")),
+                  "projects_ref":     d_src.get("projects", {}).get("ref",  top["projects"].get("ref",  "main")),
+                  "courses_repo":     d_src.get("courses", {}).get("repo", top["courses"].get("repo", "")),
+                  "courses_ref":      d_src.get("courses", {}).get("ref",  top["courses"].get("ref",  "main")),
+                  "shared_js_repo":   top["shared_js"].get("repo", ""),
+                  "shared_js_ref":    top["shared_js"].get("ref",  "main"),
+                  "site_data_common": top["website"].get("site_data", {}).get("common", ""),
+                  "site_data_i18n":   top["website"].get("site_data", {}).get("i18n", ""),
+                  # The compiler REPO still comes from inventory (owner drives
+                  # token selection at build time); the compiler REF is always
+                  # the candidate under verification, never the site's own pin
+                  # — that override is the entire point of this workflow.
+                  "compiler_repo":    top["compiler"].get("repo", ""),
+                  "compiler_clean_urls": "" if top["compiler"].get("clean_urls", True) is False else "true",
+                  "compiler_js_inline_threshold":        str(top["compiler"]["js_inline_threshold"]) if "js_inline_threshold" in top["compiler"] else "",
+                  "compiler_js_shared_inline_threshold": str(top["compiler"]["js_shared_inline_threshold"]) if "js_shared_inline_threshold" in top["compiler"] else "",
+                  "compiler_raster_inline_threshold":    str(top["compiler"]["raster_inline_threshold"]) if "raster_inline_threshold" in top["compiler"] else "",
+                  "compiler_embed_fonts":                "true" if top["compiler"].get("embed_fonts", False) else "",
+                  "compiler_inline_body_css":            "true" if top["compiler"].get("inline_body_css", False) else "",
+                  "disable_sections": ",".join(top["cfg"].get("disable_sections", [])),
+                  "content_source":   top["cfg"].get("content_source", "prod"),
+                  "tracker_enabled":     "true" if top["tracker"].get("enabled", False) else "",
+                  "tracker_sdk_version": top["tracker"].get("sdk_version", ""),
+                  "tracker_site_id":     top["tracker"].get("site_id", ""),
+                  "tracker_endpoint":    top["tracker"].get("endpoint", ""),
+                  "tracker_cdn_base":    top["tracker"].get("cdn_base", ""),
+                  "emit_content_bundle": "true" if top["cfg"].get("emit_content_bundle", False) else "",
+              }
+
+          entries = []
+          for path in sorted(glob.glob("inventory/**/*.yaml", recursive=True)):
+              with open(path) as f:
+                  cfg = yaml.safe_load(f)
+              if not isinstance(cfg, dict):
+                  continue
+              # Same skip rules as watch.yml (type / no website key) plus the
+              # retired + website-repo-presence checks from the inventory
+              # repo's scripts/check_quality_gate_wiring.py — a site with no
+              # sources.website.repo (e.g. a lambda-artifact-only entry) has
+              # nothing for the compiler to build.
+              if cfg.get("type"):
+                  continue  # kb / resume entries — not deployer website entries
+              if not cfg.get("website"):
+                  continue
+              if cfg.get("retired"):
+                  continue
+
+              sources = cfg.get("sources", {})
+              top = {
+                  "website":  sources.get("website", {}),
+                  "data":     sources.get("data", {}),
+                  "posts":    sources.get("posts", {}),
+                  "projects": sources.get("projects", {}),
+                  "courses":  sources.get("courses", {}),
+                  "shared_js": sources.get("shared_js", {}),
+                  "compiler": cfg.get("compiler", {}),
+                  "tracker":  cfg.get("tracker", {}),
+                  "cfg":      cfg,
+              }
+              if not top["website"].get("repo"):
+                  continue  # no template repo to build (e.g. a lambda-only inventory entry)
+
+              site_name = cfg["website"]
+              raw_deployments = cfg.get("deployments")
+              legacy = raw_deployments is None
+              deps = (
+                  [("production", {})] if legacy
+                  else list(raw_deployments.items())
+              )
+
+              # sibling_prefixes mirrors deploy.yml: only meaningful within one
+              # site's own deployments (e.g. en/pt sharing a bucket), so it is
+              # computed per-site, never across sites.
+              resolved = [(dep_name, resolve(site_name, dep_name, dep_cfg, top)) for dep_name, dep_cfg in deps]
+
+              for dep_name, fields in resolved:
+                  key = re.sub(r"[^A-Za-z0-9_.-]", "-", f"{site_name}-{dep_name}")
+                  entries.append({
+                      "key": key,
+                      "site": site_name,
+                      "deployment": dep_name,
+                      **fields,
+                  })
+
+          out = os.environ["GITHUB_OUTPUT"]
+          with open(out, "a") as f:
+              delim = "MATRIX_JSON_EOF"
+              f.write(f"site_count={len(entries)}\n")
+              f.write(f"matrix<<{delim}\n")
+              f.write(json.dumps(entries))
+              f.write(f"\n{delim}\n")
+
+          print(f"Enumerated {len(entries)} build entries across the fleet.", file=sys.stderr)
+          if not entries:
+              print("WARNING: zero non-retired sites enumerated — check the inventory glob/filters.", file=sys.stderr)
+          PYEOF
+
+  # ── build ─────────────────────────────────────────────────────────────────
+  # BUILD-ONLY compile per (site, deployment) — no AWS credentials, no S3, no
+  # deploy. Checkout/token handling for the per-site private repos is copied
+  # verbatim from deploy.yml's build job (see PR description for why this is
+  # used instead of local/deploy-local.sh).
+  build:
+    needs: enumerate
+    if: needs.enumerate.outputs.site_count != '0'
+    timeout-minutes: 30
+    name: Build (${{ matrix.entry.key }})
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        entry: ${{ fromJson(needs.enumerate.outputs.matrix) }}
+
+    steps:
+      - name: Harden the runner (Audit all outbound calls)
+        if: ${{ !env.ACT }} # harden-runner can't run under act/podman; runs on real GitHub only
+        uses: step-security/harden-runner@a5ad31d6a139d249332a2605b85202e8c0b78450 # v2.19.1
+        with:
+          egress-policy: audit
+
+      - name: Checkout data repo
+        if: matrix.entry.data_repo != ''
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          repository: ${{ matrix.entry.data_repo }}
+          ref: ${{ matrix.entry.data_ref }}
+          path: checkout/data
+          token: ${{ startsWith(matrix.entry.data_repo, 'ffreis-org/') && secrets.FLEET_READ_TOKEN_ORG || secrets.FLEET_READ_TOKEN_FFREIS }}
+
+      - name: Checkout website repo
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          repository: ${{ matrix.entry.website_repo }}
+          ref: ${{ matrix.entry.website_ref }}
+          path: checkout/website
+          token: ${{ startsWith(matrix.entry.website_repo, 'ffreis-org/') && secrets.FLEET_READ_TOKEN_ORG || secrets.FLEET_READ_TOKEN_FFREIS }}
+
+      - name: Checkout compiler at candidate ref
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          repository: ${{ matrix.entry.compiler_repo }}
+          ref: ${{ inputs.compiler_ref }}
+          path: checkout/compiler
+          token: ${{ startsWith(matrix.entry.compiler_repo, 'ffreis-org/') && secrets.FLEET_READ_TOKEN_ORG || secrets.FLEET_READ_TOKEN_FFREIS }}
+
+      - uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6.4.0
+        with:
+          go-version-file: checkout/compiler/go.mod
+          cache: true
+
+      - name: Detect compiler layout
+        id: compiler
+        shell: bash
+        run: |
+          set -euo pipefail
+          for root in checkout/compiler checkout/compiler/*/; do
+            if [[ -f "${root}/go.mod" && -f "${root}/cmd/website-compiler/main.go" ]]; then
+              echo "dir=${root}" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+          done
+          echo "Could not detect compiler layout under checkout/compiler" >&2; exit 1
+
+      - name: Inject data into website
+        if: matrix.entry.data_repo != ''
+        run: |
+          set -euo pipefail
+          SUBPATH="${{ matrix.entry.data_subpath }}"
+          DATA_ROOT="checkout/data${SUBPATH:+/${SUBPATH%/}}"
+          if [[ -n "$SUBPATH" ]]; then
+            DATA_PARENT="$(dirname "${DATA_ROOT}")"
+          else
+            DATA_PARENT="checkout/data"
+          fi
+          mkdir -p checkout/website/src/data/site.d
+          if [ -d "${DATA_PARENT}/shared/site.d" ]; then
+            cp -r "${DATA_PARENT}/shared/site.d/." checkout/website/src/data/site.d/
+          fi
+          cp -r "${DATA_ROOT}/site.d/." checkout/website/src/data/site.d/
+          cp "${DATA_ROOT}/site.yaml"   checkout/website/src/data/
+
+      - name: Checkout shared JS repo
+        if: matrix.entry.shared_js_repo != ''
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          repository: ${{ matrix.entry.shared_js_repo }}
+          ref: ${{ matrix.entry.shared_js_ref }}
+          path: checkout/shared-js
+          token: ${{ startsWith(matrix.entry.shared_js_repo, 'ffreis-org/') && secrets.FLEET_READ_TOKEN_ORG || secrets.FLEET_READ_TOKEN_FFREIS }}
+
+      - name: Inject shared JS into website
+        if: matrix.entry.shared_js_repo != ''
+        run: |
+          set -euo pipefail
+          mkdir -p checkout/website/src/assets/js
+          cp checkout/shared-js/*.js checkout/website/src/assets/js/
+
+      - name: Checkout posts repo
+        if: matrix.entry.posts_repo != ''
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          repository: ${{ matrix.entry.posts_repo }}
+          ref: ${{ matrix.entry.posts_ref }}
+          path: checkout/posts
+          token: ${{ startsWith(matrix.entry.posts_repo, 'ffreis-org/') && secrets.FLEET_READ_TOKEN_ORG || secrets.FLEET_READ_TOKEN_FFREIS }}
+
+      - name: Checkout projects repo
+        if: matrix.entry.projects_repo != ''
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          repository: ${{ matrix.entry.projects_repo }}
+          ref: ${{ matrix.entry.projects_ref }}
+          path: checkout/projects
+          token: ${{ startsWith(matrix.entry.projects_repo, 'ffreis-org/') && secrets.FLEET_READ_TOKEN_ORG || secrets.FLEET_READ_TOKEN_FFREIS }}
+
+      - name: Checkout courses repo
+        if: matrix.entry.courses_repo != ''
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          repository: ${{ matrix.entry.courses_repo }}
+          ref: ${{ matrix.entry.courses_ref }}
+          path: checkout/courses
+          token: ${{ startsWith(matrix.entry.courses_repo, 'ffreis-org/') && secrets.FLEET_READ_TOKEN_ORG || secrets.FLEET_READ_TOKEN_FFREIS }}
+
+      - name: Build static site
+        id: build
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          CONTENT_SOURCE="${{ matrix.entry.content_source }}"
+          POSTS_ARGS=()
+          if [[ -n "${{ matrix.entry.posts_repo }}" ]]; then
+            if [[ "$CONTENT_SOURCE" == "mock" ]]; then
+              POSTS_DIR="$GITHUB_WORKSPACE/checkout/posts/mock/posts"
+            else
+              POSTS_DIR="$GITHUB_WORKSPACE/checkout/posts/posts"
+            fi
+            if [[ -d "$POSTS_DIR" ]]; then
+              POSTS_ARGS=("-posts-dir" "$POSTS_DIR")
+            fi
+          fi
+          PROJECTS_ARGS=()
+          if [[ -n "${{ matrix.entry.projects_repo }}" ]]; then
+            if [[ "$CONTENT_SOURCE" == "mock" ]]; then
+              PROJECTS_FILE="$GITHUB_WORKSPACE/checkout/projects/mock/projects.yaml"
+            else
+              PROJECTS_FILE="$GITHUB_WORKSPACE/checkout/projects/projects.yaml"
+            fi
+            if [[ -f "$PROJECTS_FILE" ]]; then
+              PROJECTS_ARGS=("-projects-file" "$PROJECTS_FILE")
+            fi
+          fi
+          COURSES_ARGS=()
+          if [[ -n "${{ matrix.entry.courses_repo }}" ]]; then
+            if [[ "$CONTENT_SOURCE" == "mock" ]]; then
+              COURSES_FILE="$GITHUB_WORKSPACE/checkout/courses/mock/courses.yaml"
+            else
+              COURSES_FILE="$GITHUB_WORKSPACE/checkout/courses/courses.yaml"
+            fi
+            if [[ -f "$COURSES_FILE" ]]; then
+              COURSES_ARGS=("-courses-file" "$COURSES_FILE")
+            fi
+          fi
+          CONTENT_SOURCE_ARGS=()
+          DEV_DATA_ARGS=()
+          if [[ "$CONTENT_SOURCE" == "mock" ]]; then
+            CONTENT_SOURCE_ARGS=("-content-source" "mock")
+            DEV_DATA_ARGS=("-dev-data")
+          fi
+          WEBSITE_ROOT="$GITHUB_WORKSPACE/checkout/website"
+          SITE_DATA_ARGS=()
+          SD_COMMON="${{ matrix.entry.site_data_common }}"
+          SD_I18N="${{ matrix.entry.site_data_i18n }}"
+          if [[ -n "$SD_I18N" ]]; then
+            SD_LANG_DIR="${SD_I18N%/}/${{ matrix.entry.deployment }}"
+            if [[ ! -d "${WEBSITE_ROOT}/${SD_LANG_DIR}" ]]; then
+              echo "site_data.i18n is set but ${SD_LANG_DIR} is absent from the website repo" >&2
+              exit 1
+            fi
+            if [[ -n "$SD_COMMON" ]]; then
+              if [[ ! -d "${WEBSITE_ROOT}/${SD_COMMON%/}" ]]; then
+                echo "site_data.common is set but ${SD_COMMON%/} is absent from the website repo" >&2
+                exit 1
+              fi
+              SITE_DATA_ARGS=("-site-data" "${WEBSITE_ROOT}/${SD_COMMON%/}|${WEBSITE_ROOT}/${SD_LANG_DIR}")
+            else
+              SITE_DATA_ARGS=("-site-data" "${WEBSITE_ROOT}/${SD_LANG_DIR}")
+            fi
+          fi
+          JS_INLINE_ARGS=()
+          if [[ -n "${{ matrix.entry.compiler_js_inline_threshold }}" ]]; then
+            JS_INLINE_ARGS=("-js-inline-threshold" "${{ matrix.entry.compiler_js_inline_threshold }}")
+          fi
+          JS_SHARED_INLINE_ARGS=()
+          if [[ -n "${{ matrix.entry.compiler_js_shared_inline_threshold }}" ]]; then
+            JS_SHARED_INLINE_ARGS=("-js-shared-inline-threshold" "${{ matrix.entry.compiler_js_shared_inline_threshold }}")
+          fi
+          RASTER_INLINE_ARGS=()
+          if [[ -n "${{ matrix.entry.compiler_raster_inline_threshold }}" ]]; then
+            RASTER_INLINE_ARGS=("-raster-inline-threshold" "${{ matrix.entry.compiler_raster_inline_threshold }}")
+          fi
+          CLEAN_URLS_ARGS=()
+          if [[ "${{ matrix.entry.compiler_clean_urls }}" == "true" ]]; then
+            CLEAN_URLS_ARGS=("-clean-urls")
+          fi
+          EMBED_FONTS_ARGS=()
+          if [[ "${{ matrix.entry.compiler_embed_fonts }}" == "true" ]]; then
+            EMBED_FONTS_ARGS=("-embed-fonts")
+          fi
+          INLINE_BODY_CSS_ARGS=()
+          if [[ "${{ matrix.entry.compiler_inline_body_css }}" == "true" ]]; then
+            INLINE_BODY_CSS_ARGS=("-inline-body-css")
+          fi
+          DISABLE_SECTIONS_ARGS=()
+          if [[ -n "${{ matrix.entry.disable_sections }}" ]]; then
+            DISABLE_SECTIONS_ARGS=("-disable-sections" "${{ matrix.entry.disable_sections }}")
+          fi
+          TRACKER_ARGS=()
+          if [[ "${{ matrix.entry.tracker_enabled }}" == "true" ]]; then
+            TRACKER_ARGS=(
+              "-tracker-enabled"
+              "-tracker-sdk-version" "${{ matrix.entry.tracker_sdk_version }}"
+              "-tracker-site-id"     "${{ matrix.entry.tracker_site_id }}"
+              "-tracker-endpoint"    "${{ matrix.entry.tracker_endpoint }}"
+            )
+            if [[ -n "${{ matrix.entry.tracker_cdn_base }}" ]]; then
+              TRACKER_ARGS+=("-tracker-cdn-base" "${{ matrix.entry.tracker_cdn_base }}")
+            fi
+          fi
+          go -C "${{ steps.compiler.outputs.dir }}" run ./cmd/build-static \
+            -website-root "$GITHUB_WORKSPACE/checkout/website" \
+            -out "$GITHUB_WORKSPACE/dist" \
+            "${CLEAN_URLS_ARGS[@]}" \
+            "${SITE_DATA_ARGS[@]}" \
+            "${CONTENT_SOURCE_ARGS[@]}" \
+            "${DEV_DATA_ARGS[@]}" \
+            "${POSTS_ARGS[@]}" \
+            "${PROJECTS_ARGS[@]}" \
+            "${COURSES_ARGS[@]}" \
+            "${JS_INLINE_ARGS[@]}" \
+            "${JS_SHARED_INLINE_ARGS[@]}" \
+            "${RASTER_INLINE_ARGS[@]}" \
+            "${EMBED_FONTS_ARGS[@]}" \
+            "${INLINE_BODY_CSS_ARGS[@]}" \
+            "${DISABLE_SECTIONS_ARGS[@]}" \
+            "${TRACKER_ARGS[@]}"
+
+      - name: Emit content bundle
+        if: matrix.entry.emit_content_bundle == 'true'
+        run: |
+          set -euo pipefail
+          DATA_SHA="$(git -C "$GITHUB_WORKSPACE/checkout/data" rev-parse HEAD)"
+          go -C "${{ steps.compiler.outputs.dir }}" run ./cmd/emit-content-bundle \
+            -data-root "$GITHUB_WORKSPACE/checkout/data/data" \
+            -langs "${{ matrix.entry.deployment }}" \
+            -out "$GITHUB_WORKSPACE/dist/content-bundle" \
+            -source-sha "$DATA_SHA" \
+            -generated-at "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+
+      - name: Record build status
+        if: always()
+        run: |
+          set -euo pipefail
+          mkdir -p status
+          cat > "status/${{ matrix.entry.key }}.json" <<JSONEOF
+          {
+            "key": "${{ matrix.entry.key }}",
+            "site": "${{ matrix.entry.site }}",
+            "deployment": "${{ matrix.entry.deployment }}",
+            "website_repo": "${{ matrix.entry.website_repo }}",
+            "result": "${{ job.status }}"
+          }
+          JSONEOF
+
+      - name: Upload build status
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: site-status-${{ matrix.entry.key }}
+          path: status/${{ matrix.entry.key }}.json
+          retention-days: 7
+
+  # ── report ────────────────────────────────────────────────────────────────
+  # Aggregates every matrix leg's status artifact into one summary table and
+  # sets all_green. Always succeeds itself (job.status is only meaningful
+  # within the job it belongs to) — a workflow_call output is only populated
+  # when the job defining it completes successfully, so a failing report job
+  # would silently blank out all_green for promote-compiler.yml. The visible
+  # "run failed" signal for a red matrix still comes from the build job's own
+  # conclusion, which always reflects any failed leg regardless of this job.
+  report:
+    needs: build
+    if: always()
+    timeout-minutes: 15
+    name: Aggregate Verification Report
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      all_green: ${{ steps.aggregate.outputs.all_green }}
+
+    steps:
+      - name: Harden the runner (Audit all outbound calls)
+        if: ${{ !env.ACT }} # harden-runner can't run under act/podman; runs on real GitHub only
+        uses: step-security/harden-runner@a5ad31d6a139d249332a2605b85202e8c0b78450 # v2.19.1
+        with:
+          egress-policy: audit
+
+      - name: Download all build statuses
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: site-status-*
+          path: statuses
+          merge-multiple: true
+        continue-on-error: true # zero sites enumerated -> no artifacts at all
+
+      - name: Aggregate report
+        id: aggregate
+        env:
+          COMPILER_REF: ${{ inputs.compiler_ref }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PYEOF'
+          import glob, json, os
+
+          rows = []
+          for path in sorted(glob.glob("statuses/*.json")):
+              with open(path) as f:
+                  rows.append(json.load(f))
+
+          compiler_ref = os.environ.get("COMPILER_REF", "")
+          summary_path = os.environ["GITHUB_STEP_SUMMARY"]
+          out_path = os.environ["GITHUB_OUTPUT"]
+
+          passed = [r for r in rows if r.get("result") == "success"]
+          failed = [r for r in rows if r.get("result") != "success"]
+          all_green = "true" if rows and not failed else "false"
+
+          with open(summary_path, "a") as f:
+              f.write(f"## Compiler verification — `{compiler_ref}`\n\n")
+              if not rows:
+                  f.write("**NO SITES ENUMERATED** — refusing to report success. "
+                          "Check the inventory glob/filters in the enumerate job.\n\n")
+              else:
+                  f.write(f"{len(passed)}/{len(rows)} sites built successfully.\n\n")
+                  f.write("| site | deployment | website repo | result |\n")
+                  f.write("|---|---|---|---|\n")
+                  for r in sorted(rows, key=lambda r: (r.get("site", ""), r.get("deployment", ""))):
+                      mark = "✅" if r.get("result") == "success" else "❌"
+                      f.write(f"| {r.get('site','?')} | {r.get('deployment','?')} | "
+                              f"{r.get('website_repo','?')} | {mark} {r.get('result','?')} |\n")
+                  f.write("\n")
+              f.write(f"**all_green: {all_green}**\n")
+
+          with open(out_path, "a") as f:
+              f.write(f"all_green={all_green}\n")
+          PYEOF

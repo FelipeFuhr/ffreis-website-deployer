@@ -7,12 +7,14 @@ on:
     branches: [main, master]
     paths:
       - '.github/workflows/**'
+      - 'tests/**'
       - 'Makefile'
       - 'lefthook.yml'
   pull_request:
     types: [opened, synchronize, reopened, ready_for_review]
     paths:
       - '.github/workflows/**'
+      - 'tests/**'
       - 'Makefile'
       - 'lefthook.yml'
 
@@ -51,3 +53,25 @@ jobs:
 
       - name: Run actionlint
         run: actionlint
+
+  workflow-contract-tests:
+    if: ${{ github.event_name != 'pull_request' || github.event.pull_request.draft == false }}
+    timeout-minutes: 15
+    name: Workflow Contract Tests
+    permissions:
+      contents: read
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Harden the runner (Audit all outbound calls)
+        uses: step-security/harden-runner@a5ad31d6a139d249332a2605b85202e8c0b78450 # v2.19.1
+        with:
+          egress-policy: audit
+
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      # Deliberately the runner's system python3 with no extra install: the
+      # only third-party import is PyYAML, which deploy.yml's own config and
+      # smoke steps already rely on being present on this image.
+      - name: Run workflow contract tests
+        run: make test

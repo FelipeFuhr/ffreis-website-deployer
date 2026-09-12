@@ -637,6 +637,59 @@ jobs:
             -source-sha "$DATA_SHA" \
             -generated-at "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 
+      # Writes dist/build-info.json — a small machine-readable deploy stamp
+      # (which revision of the source repo is live, on which ref, built when)
+      # that rides the existing S3 sync out to the site root as
+      # /build-info.json. It is the fleet's one answer to "which build am I
+      # looking at": any site's dev panel can fetch it, and nothing about it
+      # is site-specific.
+      #
+      # Dev environments only. The file is served publicly from the site
+      # root, so prod deployments deliberately get no stamp; a
+      # `github_environment` ending in `-dev` is the same dev/prod
+      # discriminator the promote job's smoke-test skip and the config job's
+      # content_source guard already use. If a prod site ever needs a stamp,
+      # promote this condition to an inventory-declared field rather than
+      # dropping the gate.
+      #
+      # Every value arrives through `env:` so the script body carries no
+      # `${{ }}` expression: that keeps it injection-safe AND runnable
+      # outside Actions, which is exactly what tests/test_deploy_build_info.py
+      # does to test this step as it actually ships.
+      - name: Stamp build-info.json
+        if: endsWith(matrix.deployment.github_env, '-dev')
+        env:
+          # The revision is read back from the checkout itself (same approach
+          # as the content bundle above) rather than taken from the dispatch
+          # payload, so the stamp can never disagree with the tree that was
+          # actually compiled.
+          WEBSITE_DIR:  ${{ github.workspace }}/checkout/website
+          OUT_DIR:      ${{ github.workspace }}/dist
+          WEBSITE_NAME: ${{ needs.config.outputs.website_name }}
+          DEPLOYMENT:   ${{ matrix.deployment.name }}
+          WEBSITE_REF:  ${{ inputs.website_sha || matrix.deployment.website_ref }}
+        run: |
+          set -euo pipefail
+          BUILD_SHA="$(git -C "$WEBSITE_DIR" rev-parse HEAD)"
+          DEPLOYED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          mkdir -p "$OUT_DIR"
+          BUILD_SHA="$BUILD_SHA" DEPLOYED_AT="$DEPLOYED_AT" python3 - <<'PYEOF'
+          import json, os
+
+          info = {
+              "sha":        os.environ["BUILD_SHA"],
+              "branch":     os.environ["WEBSITE_REF"],
+              "deployedAt": os.environ["DEPLOYED_AT"],
+              "website":    os.environ["WEBSITE_NAME"],
+              "deployment": os.environ["DEPLOYMENT"],
+          }
+          out = os.path.join(os.environ["OUT_DIR"], "build-info.json")
+          with open(out, "w") as f:
+              json.dump(info, f, indent=2, sort_keys=True)
+              f.write("\n")
+          print(f"wrote {out}: {info}")
+          PYEOF
+
       - name: Configure AWS credentials (OIDC)
         uses: aws-actions/configure-aws-credentials@ec61189d14ec14c8efccab744f656cffd0e33f37 # v6.1.0
         with:

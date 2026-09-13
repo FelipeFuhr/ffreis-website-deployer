@@ -16,3 +16,7 @@ config/*.local.yaml
 
 scripts/hooks/
 scripts/bootstrap_lefthook.sh
+
+# python bytecode from the workflow contract tests
+__pycache__/
+*.pyc

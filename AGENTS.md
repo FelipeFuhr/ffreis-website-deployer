@@ -92,6 +92,38 @@ a fatal error. The build step then swaps the content paths to `mock/` subdirecto
 It also passes `-content-source mock` to the compiler, which enforces the anti-leak
 guard at build time: the compiler rejects any `/mock/` path when not in mock mode.
 
+## Build stamp (`/build-info.json`)
+
+Every **dev** deployment gets a `build-info.json` written into `dist/` by
+`deploy.yml`'s "Stamp build-info.json" step, just before the build artifact is
+synced. It rides the existing sync and ends up at the site root:
+
+```json
+{
+  "branch": "develop",
+  "deployedAt": "2026-09-11T10:04:22Z",
+  "deployment": "production",
+  "sha": "<40-char revision of the source repo that was compiled>",
+  "website": "<site>-dev"
+}
+```
+
+This is the fleet's single answer to "which build is live" — a site's dev panel
+fetches `/build-info.json` and renders it. It is generic: no site opts in, no
+site is named, and `sha` is read back from the website checkout (not from the
+dispatch payload) so it can never disagree with the tree that was compiled.
+
+Prod deployments deliberately get **no** stamp: the file is served publicly from
+the site root, and a `github_environment` ending in `-dev` is the same dev/prod
+discriminator the promote job's smoke-test skip and the `content_source` guard
+already use. If a prod site ever needs a stamp, turn that condition into an
+inventory-declared field rather than dropping the gate.
+
+The key names (`sha`, `branch`, `deployedAt`, `website`, `deployment`) are a
+consumer contract — renaming one breaks every site reading the file.
+`tests/test_deploy_build_info.py` executes the step's real script body and
+asserts the shape; run it with `make test`.
+
 ## Compiler embedding flags in inventory YAML
 
 The `compiler` section of each inventory YAML can carry optional fields that control

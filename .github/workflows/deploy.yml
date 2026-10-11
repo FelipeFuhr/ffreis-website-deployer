@@ -831,8 +831,15 @@ jobs:
           CF_DISTRIBUTION_ID: ${{ secrets.CF_DISTRIBUTION_ID }}
           CF_PATHS:           ${{ matrix.deployment.cloudfront_paths }}
         run: |
-          # CF_PATHS is space-joined; pass unquoted so each path is a separate argument
+          # CF_PATHS is space-joined; pass unquoted so each path is a separate
+          # argument. scan-fix(shell:unquoted-glob): an unquoted "/*" (the
+          # fleet default) also triggers pathname expansion against the
+          # runner's real filesystem root (e.g. /home, /opt, /usr) instead of
+          # the literal CloudFront path "/*" — set -f disables that expansion
+          # while keeping the intended word-splitting.
+          set -f
           # shellcheck disable=SC2086
           aws cloudfront create-invalidation \
             --distribution-id "$CF_DISTRIBUTION_ID" \
             --paths $CF_PATHS
+          set +f

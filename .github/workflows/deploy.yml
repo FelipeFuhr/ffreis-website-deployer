@@ -154,8 +154,8 @@ jobs:
                   "compiler_ref":     top_compiler.get("ref", "main"),
                   # Every existing site's templates assume clean URLs (the historical,
                   # unconditional default), so this only turns OFF -clean-urls, and only
-                  # when a site's own templates use flat .html-style hrefs instead (e.g.
-                  # forma-dev — see its inventory entry for why).
+                  # when a site's own templates use flat .html-style hrefs instead (see
+                  # that site's inventory entry for why).
                   "compiler_clean_urls": "" if top_compiler.get("clean_urls", True) is False else "true",
                   "compiler_js_inline_threshold":        str(top_compiler["js_inline_threshold"]) if "js_inline_threshold" in top_compiler else "",
                   "compiler_js_shared_inline_threshold": str(top_compiler["js_shared_inline_threshold"]) if "js_shared_inline_threshold" in top_compiler else "",
@@ -177,7 +177,7 @@ jobs:
                   # smoke since GH runner IPs aren't in the allowlist. Set in inventory at
                   # publish.skip_smoke: true (or per-deployment override).
                   "skip_smoke":       "true" if dep_cfg.get("skip_smoke", top_publish.get("skip_smoke", False)) else "",
-                  # Emit a per-language content bundle for native mobile apps (petlook-mobile).
+                  # Emit a per-language content bundle for native mobile apps (a private consumer).
                   # When true the build step runs emit-content-bundle and the output rides the
                   # existing S3 sync under dist/content-bundle/. Top-level only; not per-deployment.
                   "emit_content_bundle": "true" if cfg.get("emit_content_bundle", False) else "",

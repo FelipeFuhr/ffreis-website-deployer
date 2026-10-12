@@ -138,13 +138,22 @@ compiler:
   raster_inline_threshold: 2147483647  # optional; compiler default = 0 (disabled); large = all
   embed_fonts: false                # optional; default false
   inline_body_css: false            # optional; default false
+  allow_blanket_robots_disallow: false  # optional; default false — see below
 ```
 
 These fields are site-level (not per-deployment). The `deploy.yml` config job
 extracts them from `top_compiler` and passes them as matrix outputs:
 `compiler_js_inline_threshold`, `compiler_js_shared_inline_threshold`,
-`compiler_raster_inline_threshold`, `compiler_embed_fonts`, `compiler_inline_body_css`.
+`compiler_raster_inline_threshold`, `compiler_embed_fonts`, `compiler_inline_body_css`,
+`compiler_allow_blanket_robots_disallow`.
 The build step converts them into the matching compiler flags.
+
+`allow_blanket_robots_disallow` is not an embedding flag — the compiler's
+`build-static` command hard-errors on a committed `robots.txt` with a blanket
+`Disallow: /` under `User-agent: *` unless this is set, which is the correct
+default for every production site. Set it `true` only for a dev-only site that
+deliberately ships a placeholder blanket-disallow `robots.txt` (no production
+domain yet). It maps to the compiler's `-allow-blanket-robots-disallow` flag.
 
 ## Two site archetypes: split template+data vs compiler-native
 

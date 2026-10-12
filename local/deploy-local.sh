@@ -380,6 +380,17 @@ fi
 command -v aws >/dev/null || { echo "error: aws CLI not found" >&2; exit 5; }
 [[ -n "$CF_DISTRIBUTION_ID" ]] || { echo "error: --cf-distribution-id / CF_DISTRIBUTION_ID required for --deploy" >&2; exit 5; }
 
+# scan-fix(shell:unquoted-glob): cf_paths/${!CF_INVALIDATE_PATHS[*]} below are
+# intentionally unquoted to word-split multiple space-joined paths, but an
+# unquoted "/*" (the fleet's default cloudfront_invalidate_paths value) also
+# triggers pathname expansion against this machine's real filesystem root —
+# observed invalidating /etc, /home, /var, etc. instead of the literal
+# CloudFront path "/*". set -f disables that expansion while keeping the
+# intended word-splitting; it must stay on through BOTH unquoted expansion
+# sites below (building the array, then passing it to --paths), not just
+# the first — a glob-looking key re-expands at the point of use too.
+set -f
+
 declare -A CF_INVALIDATE_PATHS=()
 for row in "${SYNC_PLAN[@]}"; do
   IFS=$'\x1f' read -r dist bucket prefix region cf_paths sibling <<< "$row"
@@ -400,5 +411,6 @@ if [[ ${#CF_INVALIDATE_PATHS[@]} -gt 0 ]]; then
   aws cloudfront create-invalidation --distribution-id "$CF_DISTRIBUTION_ID" \
     --paths ${!CF_INVALIDATE_PATHS[*]}
 fi
+set +f
 
 echo "✓ deploy complete for $WEBSITE_NAME."

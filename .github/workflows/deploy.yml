@@ -162,6 +162,7 @@ jobs:
                   "compiler_raster_inline_threshold":    str(top_compiler["raster_inline_threshold"]) if "raster_inline_threshold" in top_compiler else "",
                   "compiler_embed_fonts":                "true" if top_compiler.get("embed_fonts", False) else "",
                   "compiler_inline_body_css":            "true" if top_compiler.get("inline_body_css", False) else "",
+                  "compiler_allow_blanket_robots_disallow": "true" if top_compiler.get("allow_blanket_robots_disallow", False) else "",
                   # Site-level list of sections to hide (blog/courses/projects); prod sets it, dev omits.
                   "disable_sections":                    ",".join(cfg.get("disable_sections", [])),
                   "builds_bucket":    top_builds.get("bucket", ""),
@@ -589,6 +590,10 @@ jobs:
           if [[ "${{ matrix.deployment.compiler_inline_body_css }}" == "true" ]]; then
             INLINE_BODY_CSS_ARGS=("-inline-body-css")
           fi
+          ALLOW_BLANKET_ROBOTS_ARGS=()
+          if [[ "${{ matrix.deployment.compiler_allow_blanket_robots_disallow }}" == "true" ]]; then
+            ALLOW_BLANKET_ROBOTS_ARGS=("-allow-blanket-robots-disallow")
+          fi
           DISABLE_SECTIONS_ARGS=()
           if [[ -n "${{ matrix.deployment.disable_sections }}" ]]; then
             DISABLE_SECTIONS_ARGS=("-disable-sections" "${{ matrix.deployment.disable_sections }}")
@@ -621,6 +626,7 @@ jobs:
             "${RASTER_INLINE_ARGS[@]}" \
             "${EMBED_FONTS_ARGS[@]}" \
             "${INLINE_BODY_CSS_ARGS[@]}" \
+            "${ALLOW_BLANKET_ROBOTS_ARGS[@]}" \
             "${DISABLE_SECTIONS_ARGS[@]}" \
             "${TRACKER_ARGS[@]}"
 

@@ -32,6 +32,13 @@ jobs:
   verify:
     name: Verify Fleet Build
     uses: ./.github/workflows/verify-compiler.yml
+    # Must be a superset of every job verify-compiler.yml's own jobs declare
+    # (enumerate/build/report all ask for contents: read) -- GitHub rejects
+    # the whole call graph at compile time otherwise: startup_failure, zero
+    # jobs, no annotations, invisible to actionlint. See that repo's own
+    # feedback_caller_callee_permission_startup_failure.
+    permissions:
+      contents: read
     with:
       compiler_ref: ${{ inputs.compiler_ref }}
     secrets: inherit

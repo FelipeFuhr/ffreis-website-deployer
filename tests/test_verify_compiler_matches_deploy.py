@@ -138,6 +138,46 @@ class TestCompilerFlagParity(unittest.TestCase):
                 )
 
 
+class TestBuildStaticArgParity(unittest.TestCase):
+    """The strongest of these checks, and the one that caught the third gap.
+
+    A compiler flag need not come from the `compiler:` block at all —
+    `-sibling-base-paths` is derived from each deployment's publish prefix. So a
+    key-set comparison misses it entirely: verify-compiler.yml's resolve()
+    docstring declared every publish field "deploy-only and irrelevant to
+    compiler verification", which is exactly wrong for a publish field a
+    COMPILER flag is computed from. ffreis-pt's own "/pt/blog/" was then
+    reported as a broken "/blog/" — a red site with a green deploy.
+
+    Comparing what actually reaches `build-static` is independent of where a
+    value came from, so it covers flags nobody has thought of yet.
+    """
+
+    # Arrays the real deploy may pass that a build-only verification cannot.
+    # Each needs a reason, and the bar is the same as for compiler keys: it must
+    # be about publishing, never about compiling.
+    DEPLOY_ONLY_ARRAYS: dict[str, str] = {}
+
+    def test_build_static_receives_the_same_arg_arrays(self):
+        deploy_arrays = build_static_arrays(DEPLOY)
+        verify_arrays = build_static_arrays(VERIFY)
+        self.assertTrue(deploy_arrays, "parser found no build-static arrays in deploy.yml")
+        self.assertTrue(verify_arrays, "parser found no build-static arrays in verify-compiler.yml")
+
+        missing = deploy_arrays - verify_arrays - set(self.DEPLOY_ONLY_ARRAYS)
+        self.assertEqual(
+            missing,
+            set(),
+            "deploy.yml expands these into build-static and verify-compiler.yml "
+            f"does not: {sorted(missing)}. The verification build then compiles "
+            "with a different flag set than the real deploy, so a site can fail "
+            "verification over a flag its deploy passes — which blocks the "
+            "`stable` promotion for a reason that does not exist. Add it to "
+            "verify-compiler.yml, or record it in DEPLOY_ONLY_ARRAYS with the "
+            "publishing-specific reason a build-only run cannot have it.",
+        )
+
+
 class TestSharedStepParity(unittest.TestCase):
     """Steps that do the same job in both workflows must be literally the same.
 

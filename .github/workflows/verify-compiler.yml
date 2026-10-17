@@ -81,10 +81,21 @@ jobs:
 
           def resolve(site_name, dep_name, dep_cfg, top):
               """Mirror deploy.yml's config-job resolve(), scoped to the fields
-              a BUILD-ONLY compile needs (no publish/bucket/CF/env/smoke fields
-              — those are deploy-only and irrelevant to compiler verification)."""
+              a BUILD-ONLY compile needs (no CF/env/smoke fields — those are
+              deploy-only and irrelevant to compiler verification).
+
+              publish bucket/prefix ARE needed despite nothing being published
+              here: they are what `sibling_prefixes` is derived from, and that
+              feeds the compiler's own `-sibling-base-paths` flag, which changes
+              link validation. Treating every publish field as deploy-only is
+              what made ffreis-pt fail verification on a link its real deploy
+              resolves fine."""
               d_src = dep_cfg.get("sources", {})
+              d_pub = dep_cfg.get("publish", {})
+              top_pub = top["publish"]
               return {
+                  "publish_bucket":   d_pub.get("bucket", top_pub.get("bucket", "")),
+                  "publish_prefix":   d_pub.get("prefix", top_pub.get("prefix", "")),
                   "website_repo":     top["website"].get("repo", ""),
                   "website_ref":      d_src.get("website", {}).get("ref", top["website"].get("ref", "main")),
                   "data_repo":        top["data"].get("repo", ""),
@@ -150,6 +161,7 @@ jobs:
                   "shared_js": sources.get("shared_js", {}),
                   "compiler": cfg.get("compiler", {}),
                   "tracker":  cfg.get("tracker", {}),
+                  "publish":  cfg.get("publish", {}),
                   "cfg":      cfg,
               }
               if not top["website"].get("repo"):
@@ -167,6 +179,18 @@ jobs:
               # site's own deployments (e.g. en/pt sharing a bucket), so it is
               # computed per-site, never across sites.
               resolved = [(dep_name, resolve(site_name, dep_name, dep_cfg, top)) for dep_name, dep_cfg in deps]
+
+              # This comment used to stand here with no code under it. The
+              # compiler needs these prefixes (-sibling-base-paths) to know that
+              # an absolute href into a sibling language's prefix is a real
+              # cross-deployment link and not a broken one; without them,
+              # ffreis-pt's own "/pt/blog/" was reported as a broken "/blog/".
+              bucket_prefixes = [(f["publish_bucket"], f["publish_prefix"]) for _, f in resolved]
+              for _, fields in resolved:
+                  fields["sibling_prefixes"] = " ".join(
+                      p for (b, p) in bucket_prefixes
+                      if b == fields["publish_bucket"] and p and p != fields["publish_prefix"]
+                  )
 
               for dep_name, fields in resolved:
                   key = re.sub(r"[^A-Za-z0-9_.-]", "-", f"{site_name}-{dep_name}")
@@ -436,6 +460,11 @@ jobs:
           if [[ "${{ matrix.entry.compiler_allow_blanket_robots_disallow }}" == "true" ]]; then
             ALLOW_BLANKET_ROBOTS_ARGS=("-allow-blanket-robots-disallow")
           fi
+          SIBLING_ARGS=()
+          SIBLING_PREFIXES="${{ matrix.entry.sibling_prefixes }}"
+          if [[ -n "$SIBLING_PREFIXES" ]]; then
+            SIBLING_ARGS=("-sibling-base-paths" "${SIBLING_PREFIXES// /,}")
+          fi
           DISABLE_SECTIONS_ARGS=()
           if [[ -n "${{ matrix.entry.disable_sections }}" ]]; then
             DISABLE_SECTIONS_ARGS=("-disable-sections" "${{ matrix.entry.disable_sections }}")
@@ -465,6 +494,7 @@ jobs:
             "${JS_INLINE_ARGS[@]}" \
             "${JS_SHARED_INLINE_ARGS[@]}" \
             "${RASTER_INLINE_ARGS[@]}" \
+            "${SIBLING_ARGS[@]}" \
             "${EMBED_FONTS_ARGS[@]}" \
             "${INLINE_BODY_CSS_ARGS[@]}" \
             "${ALLOW_BLANKET_ROBOTS_ARGS[@]}" \

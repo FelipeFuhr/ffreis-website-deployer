@@ -111,6 +111,7 @@ jobs:
                   "compiler_raster_inline_threshold":    str(top["compiler"]["raster_inline_threshold"]) if "raster_inline_threshold" in top["compiler"] else "",
                   "compiler_embed_fonts":                "true" if top["compiler"].get("embed_fonts", False) else "",
                   "compiler_inline_body_css":            "true" if top["compiler"].get("inline_body_css", False) else "",
+                  "compiler_allow_blanket_robots_disallow": "true" if top["compiler"].get("allow_blanket_robots_disallow", False) else "",
                   "disable_sections": ",".join(top["cfg"].get("disable_sections", [])),
                   "content_source":   top["cfg"].get("content_source", "prod"),
                   "tracker_enabled":     "true" if top["tracker"].get("enabled", False) else "",
@@ -262,18 +263,42 @@ jobs:
         run: |
           set -euo pipefail
           SUBPATH="${{ matrix.entry.data_subpath }}"
-          DATA_ROOT="checkout/data${SUBPATH:+/${SUBPATH%/}}"
-          if [[ -n "$SUBPATH" ]]; then
-            DATA_PARENT="$(dirname "${DATA_ROOT}")"
+          SD_I18N="${{ matrix.entry.site_data_i18n }}"
+          if [[ -n "$SD_I18N" ]]; then
+            # Compiler-native LAYERED archetype (ffreis-urbs). The data repo
+            # carries the per-language layer tree itself -- i18n/<lang>/*.yaml,
+            # with no site.d/ and no site.yaml -- and the website repo keeps the
+            # common layer. So the injection is a directory swap, not a merge:
+            # replace the website's layer dir wholesale, which is also what
+            # makes a file DELETED in the data repo actually disappear from the
+            # build instead of surviving as a stale copy.
+            SRC="checkout/data${SUBPATH:+/${SUBPATH%/}}"
+            DEST="checkout/website/${SD_I18N%/}"
+            if [[ ! -d "$SRC" ]]; then
+              echo "site_data.i18n is set, so the data repo must carry the language layers at '${SUBPATH:-<repo root>}' -- not found" >&2
+              exit 1
+            fi
+            rm -rf "$DEST"
+            mkdir -p "$(dirname "$DEST")"
+            cp -r "$SRC" "$DEST"
           else
-            DATA_PARENT="checkout/data"
+            # Split template+data archetype: the data repo carries site.d/ +
+            # site.yaml, which are merged into the website's own src/data/.
+            DATA_ROOT="checkout/data${SUBPATH:+/${SUBPATH%/}}"
+            # shared/ lives alongside the language dirs; derive its parent from DATA_ROOT.
+            # Works whether subpath is "en/" (root layout) or "data/en/" (nested layout).
+            if [[ -n "$SUBPATH" ]]; then
+              DATA_PARENT="$(dirname "${DATA_ROOT}")"
+            else
+              DATA_PARENT="checkout/data"
+            fi
+            mkdir -p checkout/website/src/data/site.d
+            if [ -d "${DATA_PARENT}/shared/site.d" ]; then
+              cp -r "${DATA_PARENT}/shared/site.d/." checkout/website/src/data/site.d/
+            fi
+            cp -r "${DATA_ROOT}/site.d/." checkout/website/src/data/site.d/
+            cp "${DATA_ROOT}/site.yaml"   checkout/website/src/data/
           fi
-          mkdir -p checkout/website/src/data/site.d
-          if [ -d "${DATA_PARENT}/shared/site.d" ]; then
-            cp -r "${DATA_PARENT}/shared/site.d/." checkout/website/src/data/site.d/
-          fi
-          cp -r "${DATA_ROOT}/site.d/." checkout/website/src/data/site.d/
-          cp "${DATA_ROOT}/site.yaml"   checkout/website/src/data/
 
       - name: Checkout shared JS repo
         if: matrix.entry.shared_js_repo != ''
@@ -407,6 +432,10 @@ jobs:
           if [[ "${{ matrix.entry.compiler_inline_body_css }}" == "true" ]]; then
             INLINE_BODY_CSS_ARGS=("-inline-body-css")
           fi
+          ALLOW_BLANKET_ROBOTS_ARGS=()
+          if [[ "${{ matrix.entry.compiler_allow_blanket_robots_disallow }}" == "true" ]]; then
+            ALLOW_BLANKET_ROBOTS_ARGS=("-allow-blanket-robots-disallow")
+          fi
           DISABLE_SECTIONS_ARGS=()
           if [[ -n "${{ matrix.entry.disable_sections }}" ]]; then
             DISABLE_SECTIONS_ARGS=("-disable-sections" "${{ matrix.entry.disable_sections }}")
@@ -438,6 +467,7 @@ jobs:
             "${RASTER_INLINE_ARGS[@]}" \
             "${EMBED_FONTS_ARGS[@]}" \
             "${INLINE_BODY_CSS_ARGS[@]}" \
+            "${ALLOW_BLANKET_ROBOTS_ARGS[@]}" \
             "${DISABLE_SECTIONS_ARGS[@]}" \
             "${TRACKER_ARGS[@]}"
 

@@ -270,6 +270,18 @@ build and defeats the entire point of having a last-known-good pointer.
   an `all_green` output. Callable directly via `workflow_dispatch` for an
   ad-hoc "does this candidate build everywhere" check, or via `workflow_call`
   from `promote-compiler.yml`.
+  **It is a replica, and `tests/test_verify_compiler_matches_deploy.py` is what
+  keeps it one.** Any compiler flag, or any step shared with `deploy.yml`
+  (`Inject data into website`, `Inject shared JS into website`), must exist in
+  both files and be byte-identical apart from the
+  `matrix.deployment`/`matrix.entry` context name. Drift here does not show up
+  as a failure in the replica — it shows up as a **red matrix for sites that
+  deploy fine**, which makes `stable` unpromotable for a reason nobody can act
+  on. It happened twice already: `compiler.allow_blanket_robots_disallow` and
+  the `site_data.i18n` inject branch were both added to `deploy.yml` only, and
+  between them accounted for 4 of the 10 red sites on 2026-10-16. The repo's
+  other contract tests all read `deploy.yml` alone and could not see it. When
+  you add a compiler flag, add it to **both** workflows in the same commit.
 - `promote-compiler.yml` — runs `verify-compiler.yml`, and only when every
   site came back green (and `dry_run` is `false`) force-updates `stable` to
   the candidate's resolved SHA via the Git References API. A failed or partial

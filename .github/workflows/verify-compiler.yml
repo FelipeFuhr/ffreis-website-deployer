@@ -1,13 +1,24 @@
 name: Verify Compiler
 
 # Fleet-wide verification build: compiles EVERY non-retired fleet site with a
-# candidate compiler ref, with no AWS credentials and no deploy step. Used by
-# promote-compiler.yml as the gate before moving the compiler's `stable`
-# branch (the fleet's last-known-good pointer) — see AGENTS.md "Compiler
-# promotion / stable pointer".
+# candidate compiler ref, with no AWS credentials and no deploy step.
 #
-# Callable directly (workflow_dispatch) for ad-hoc "does this candidate build
-# everywhere" checks, and via workflow_call from promote-compiler.yml.
+# It used to exist as the gate for promote-compiler.yml, which moved the
+# compiler's `stable` pointer. `stable` is retired (see AGENTS.md "Compiler
+# pinning") and that workflow is gone; this one stays, because the capability
+# it provides is independently valuable and is the thing that was actually
+# being used:
+#
+#   gh workflow run "Verify Compiler" -R FelipeFuhr/ffreis-website-deployer \
+#     --field compiler_ref=<any branch, tag or SHA>
+#
+# It builds all ~24 fleet sites against a candidate and reports a per-site
+# pass/fail table, so the blast radius of a compiler change can be MEASURED
+# before merging rather than guessed. Used exactly that way on 2026-10-17 to
+# show that a candidate changed the state of precisely one site.
+#
+# `all_green` and the workflow_call trigger are kept so a future caller can
+# gate on it without re-deriving the matrix.
 
 permissions: {}
 
@@ -32,7 +43,7 @@ on:
 concurrency:
   # Distinct "verify-compiler" infix so this never collides with a caller's
   # own ${{ github.workflow }}-${{ github.ref }} group when invoked via
-  # workflow_call from promote-compiler.yml.
+  # workflow_call by a future caller.
   group: verify-compiler-${{ inputs.compiler_ref }}
   cancel-in-progress: true
 
@@ -541,7 +552,7 @@ jobs:
   # sets all_green. Always succeeds itself (job.status is only meaningful
   # within the job it belongs to) — a workflow_call output is only populated
   # when the job defining it completes successfully, so a failing report job
-  # would silently blank out all_green for promote-compiler.yml. The visible
+  # would silently blank out all_green for any workflow_call caller. The visible
   # "run failed" signal for a red matrix still comes from the build job's own
   # conclusion, which always reflects any failed leg regardless of this job.
   report:

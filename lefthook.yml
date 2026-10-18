@@ -1,6 +1,13 @@
 remotes:
   - git_url: https://github.com/FelipeFuhr/ffreis-platform-standards
-    ref: v1.6.0
+    # v1.11.1, not v1.6.0: the shared `actionlint-workflows` hook passed
+    # DELETED workflow paths to actionlint, because it selected files with a
+    # bare `git diff --cached --name-only`. Deleting a workflow therefore
+    # aborted the commit with `could not read .github/workflows/<file>` --
+    # which is exactly what happened retiring promote-compiler.yml. Fixed
+    # upstream in v1.7.3 by adding `--diff-filter=d`; this bump is how the fix
+    # arrives here rather than being worked around locally.
+    ref: v1.11.1
     configs:
       - lefthook/base.yml
       - lefthook/actionlint.yml

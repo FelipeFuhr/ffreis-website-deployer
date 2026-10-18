@@ -249,79 +249,81 @@ CF_DISTRIBUTION_ID=<id> local/deploy-local.sh ffreis --deploy --yes-prod   # pub
 - This is a `-content-source prod` build; it does not enable the `mock/` content
   system (see "Content source selection"). The two guards are independent.
 
-## Compiler promotion / stable pointer
+## Compiler pinning (the `stable` pointer is RETIRED)
 
-`FelipeFuhr/ffreis-website-compiler` carries a `stable` branch — the fleet's
-**last-known-good** compiler pointer. Every site's `compiler.ref` is intended
-to track `stable` (not `main`), so a compiler regression on `main` never
-propagates to production builds by itself: `stable` only moves when a human
-explicitly promotes a candidate, and only after every fleet site has been
-proven to build against it.
+Every consumer of the compiler pins an **exact release tag**. There is no
+moving pointer any more, and `promote-compiler.yml` has been removed.
 
-**`promote-compiler.yml` is the only workflow allowed to move `stable`.**
-Never force-push `stable` by hand — it bypasses the fleet-wide verification
-build and defeats the entire point of having a last-known-good pointer.
+### Why `stable` was retired rather than fixed
 
-- `verify-compiler.yml` — BUILD-ONLY fleet verification matrix (no AWS
-  credentials, no S3, no deploy). Enumerates every non-retired inventory site
-  (same `type:`/`retired:`/website-repo-presence rules as `watch.yml` and the
-  inventory repo's `scripts/check_quality_gate_wiring.py`), builds each one
-  with the candidate compiler ref, and reports a per-site pass/fail table plus
-  an `all_green` output. Callable directly via `workflow_dispatch` for an
-  ad-hoc "does this candidate build everywhere" check, or via `workflow_call`
-  from `promote-compiler.yml`.
-  **It is a replica, and `tests/test_verify_compiler_matches_deploy.py` is what
-  keeps it one.** Any compiler flag, or any step shared with `deploy.yml`
-  (`Inject data into website`, `Inject shared JS into website`), must exist in
-  both files and be byte-identical apart from the
-  `matrix.deployment`/`matrix.entry` context name. Drift here does not show up
-  as a failure in the replica — it shows up as a **red matrix for sites that
-  deploy fine**, which makes `stable` unpromotable for a reason nobody can act
-  on. It happened twice already: `compiler.allow_blanket_robots_disallow` and
-  the `site_data.i18n` inject branch were both added to `deploy.yml` only, and
-  between them accounted for 4 of the 10 red sites on 2026-10-16. The repo's
-  other contract tests all read `deploy.yml` alone and could not see it. When
-  you add a compiler flag, add it to **both** workflows in the same commit.
-- `promote-compiler.yml` — runs `verify-compiler.yml`, and only when every
-  site came back green (and `dry_run` is `false`) force-updates `stable` to
-  the candidate's resolved SHA via the Git References API. A failed or partial
-  verification simply never reaches the promote job — the failing run itself,
-  with its per-site matrix, **is** the alert for now (see the in-repo
-  follow-up note in `promote-compiler.yml` about auto-filing an issue on the
-  compiler repo instead).
+`stable` was the fleet's "last-known-good" pointer, moved only by
+`promote-compiler.yml` after every fleet site built green against a candidate.
+The design was sound; the instance never worked:
 
-### Running a promotion
+- the promotion **never once succeeded** — 9 runs, all failed;
+- `COMPILER_PROMOTE_TOKEN`, the narrowly-scoped PAT it needs to update a ref in
+  another repository, was never provisioned, and a PAT cannot be minted via the
+  API — it is a web-UI-only action;
+- so `stable` sat frozen at `d1526ab` from the day it was created: 17 commits
+  behind v1.0.1 and predating the `css/pages/<page>.css` per-page CSS
+  convention entirely.
+
+A site pinned to it therefore **built green and shipped unstyled pages**, and
+several did, because `stable` was the default in three separate places — this
+repo's inventory, the shared `ffreis-workflows-website` quality workflows, and
+individual site Makefiles. Every quality gate those workflows ran was judging an
+artefact production never ships.
+
+By 2026-10-17 the pointer had **zero** consumers: every inventory entry pins a
+release, no site workflow falls back to it, and the shared workflow library's
+`compiler-ref` default is an exact tag. Keeping a promotion mechanism — and
+provisioning a high-consequence credential for it — to serve zero consumers was
+the wrong trade. An exact tag per consumer gives the same protection with no
+moving parts and no secret.
+
+The `stable` BRANCH itself is left in place rather than deleted, so no existing
+clone breaks; it is frozen and must not be pinned. Deleting it is a separate,
+deliberate step.
+
+### What replaces it
+
+Pin a release tag, and keep the two places that reference it equal:
+
+- `compiler.ref` in the site's `ffreis-website-inventory` entry (drives the
+  real deploy), and
+- the site's own `WEBSITE_COMPILER_REF` / workflow `compiler-ref` (drives CI).
+
+When those two disagree, CI gates a different artefact than production ships —
+which is the same failure `stable` caused, arrived at a different way. A site
+Makefile should also normalise an empty-but-set `WEBSITE_COMPILER_REF` and
+verify the ref against an existing sibling checkout; see ffreis-forma's
+`ensure-compiler` and its `tests/regression/compiler-pin-is-not-inert.test.js`
+for the three independent ways a pin can turn out to be inert.
+
+### `verify-compiler.yml` stays, and is the useful half
+
+It builds every non-retired fleet site against any candidate ref, with no AWS
+credentials and no deploy step:
 
 ```
-gh workflow run promote-compiler.yml -R FelipeFuhr/ffreis-website-deployer \
-  -f compiler_ref=main -f dry_run=false
+gh workflow run "Verify Compiler" -R FelipeFuhr/ffreis-website-deployer \
+  --field compiler_ref=<branch, tag or SHA>
 ```
 
-- `compiler_ref` defaults to `main` — pass a specific branch/tag/SHA to
-  promote something else.
-- Set `dry_run=true` to run the fleet verification without moving `stable`
-  (useful to check a candidate before committing to it).
-- Requires the `COMPILER_PROMOTE_TOKEN` repo secret: a fine-grained PAT scoped
-  to the `FelipeFuhr` account with **Contents: Read and write** on
-  `ffreis-website-compiler` (that repo only — do not grant it fleet-wide
-  access). The default `GITHUB_TOKEN` cannot push to a different repository,
-  and the broader `FLEET_WRITE_TOKEN_FFREIS` already used elsewhere in this
-  repo is deliberately NOT reused here to keep this high-consequence action on
-  its own narrowly-scoped credential. Provision with:
-  ```
-  gh secret set COMPILER_PROMOTE_TOKEN -R FelipeFuhr/ffreis-website-deployer
-  ```
-  (paste the PAT to stdin — never pass `--body -`, see
-  `feedback_gh_secret_set_body_dash_bug` in auto-memory).
+Its remaining job is **measurement**: run it against a candidate and against the
+current pin, and diff the per-site table to see a compiler change's real blast
+radius before merging. Used exactly that way on 2026-10-17, where it showed a
+candidate changed the state of precisely one site out of 24 — and that the one
+change was the bug being fixed.
 
-### Rolling back
+`tests/test_verify_compiler_matches_deploy.py` is what keeps it honest: the
+workflow is a replica of `deploy.yml`'s build path, and a replica drifts unless
+something compares them.
 
-There is no separate "rollback" workflow — a rollback is just another
-promotion. Re-run `promote-compiler.yml` with `compiler_ref` set to the older
-known-good SHA/tag (e.g. the previous `stable` SHA, findable via
-`gh api repos/FelipeFuhr/ffreis-website-compiler/git/refs/heads/stable` history
-or the promotion record left in each run's step summary). It goes through the
-same fleet verification as any other promotion before `stable` moves.
+### Rolling back a compiler change
+
+Re-pin. A rollback is an ordinary pin bump to an older release tag in the two
+places listed above — no workflow, no credential, no force-moved ref.
 
 ## Keeping this file current
 

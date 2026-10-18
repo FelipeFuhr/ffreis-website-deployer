@@ -1,11 +1,14 @@
 #!/usr/bin/env python3
 """Drift guard: verify-compiler.yml must stay a faithful replica of deploy.yml.
 
-`verify-compiler.yml` is what gates the `stable` pointer: `promote-compiler.yml`
-moves `stable` only when every fleet site builds green here. AGENTS.md calls it
-a build-only replica of deploy.yml's build path, and that is exactly what makes
-it useful — a candidate that verifies here is a candidate the real deploy can
-run.
+`verify-compiler.yml` is the fleet-wide build matrix: it compiles every
+non-retired site against a candidate compiler ref. It used to gate the `stable`
+pointer, which is now retired — but the replica property is what made it worth
+keeping, because the workflow's remaining job is to MEASURE a candidate's blast
+radius across the fleet. AGENTS.md calls it a build-only replica of deploy.yml's
+build path, and that is exactly what makes it useful: a candidate that verifies
+here is a candidate the real deploy can run, and a per-site before/after diff
+means something.
 
 It had silently stopped being one. Two things were added to deploy.yml and never
 to the replica:

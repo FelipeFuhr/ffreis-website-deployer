@@ -129,6 +129,20 @@ jobs:
               d_crs = d_src.get("courses",  {})
               d_pub = dep_cfg.get("publish", {})
               d_cf  = d_pub.get("cloudfront_invalidate_paths", top_cf)
+              prefix = d_pub.get("prefix", "")
+              # A prefixed deployment publishes NOTHING to the bucket root, so
+              # the historical ["/"] default aimed the post-deploy check at a
+              # path this deployment does not maintain — on forma-dev that meant
+              # every `en`/`pt` deploy was gated on 60 root objects frozen since
+              # 2026-10-12. The default must derive from the prefix.
+              #
+              # `/{prefix}index.html`, not `/{prefix}/`: CloudFront's
+              # DefaultRootObject applies ONLY to the distribution root, so
+              # `/en/` has no guaranteed mapping to `en/index.html` unless the
+              # site also runs a directory-index function. The explicit key is
+              # the one URL that is certain to exist for every archetype,
+              # clean-URL or flat-.html.
+              default_smoke = [f"/{prefix.strip('/')}/index.html"] if prefix else ["/"]
               return {
                   "name":             dep_name,
                   "deploy_mode":      dep_cfg.get("deploy_mode", top_mode),
@@ -168,12 +182,12 @@ jobs:
                   "builds_bucket":    top_builds.get("bucket", ""),
                   "builds_region":    top_builds.get("region", "us-east-1"),
                   "publish_bucket":   d_pub.get("bucket", top_publish.get("bucket", "")),
-                  "publish_prefix":   d_pub.get("prefix", ""),
+                  "publish_prefix":   prefix,
                   "publish_region":   d_pub.get("region", top_publish.get("region", top_builds.get("region", "us-east-1"))),
                   "cloudfront_paths": " ".join(d_cf),
                   "github_env":       dep_cfg.get("github_environment", top_env),
                   "staging_prefix":   f"{name}/{dep_name}" if not legacy else name,
-                  "smoke_paths":      " ".join(dep_cfg.get("smoke_paths", top_publish.get("smoke_paths", ["/"]))),
+                  "smoke_paths":      " ".join(dep_cfg.get("smoke_paths", top_publish.get("smoke_paths", default_smoke))),
                   # IP-restricted sites (WAF-allowlist on prod, not just dev) need to skip
                   # smoke since GH runner IPs aren't in the allowlist. Set in inventory at
                   # publish.skip_smoke: true (or per-deployment override).
@@ -216,6 +230,24 @@ jobs:
                   if b == d["publish_bucket"] and p and p != d["publish_prefix"]
               ]
               d["sibling_prefixes"] = " ".join(siblings)
+
+          # For the promote job's orphan scan: the FULL set of prefixes declared
+          # for this deployment's publish bucket (its own included), and whether
+          # any deployment claims the bucket ROOT. Anything outside that set is
+          # maintained by no deployment — never synced, never invalidated — so it
+          # serves its current bytes indefinitely.
+          #
+          # Derived from all_deps, not from `selected` below: a single-deployment
+          # dispatch must still see its siblings' prefixes, or every key the
+          # other languages maintain would look like an orphan.
+          for d in all_deps:
+              d["managed_prefixes"] = " ".join(sorted({
+                  p for (b, p) in all_buckets_prefixes
+                  if b == d["publish_bucket"] and p
+              }))
+              d["root_is_managed"] = "true" if any(
+                  b == d["publish_bucket"] and not p for (b, p) in all_buckets_prefixes
+              ) else ""
 
           if deployment_filter:
               selected = [d for d in all_deps if d["name"] == deployment_filter]
@@ -817,32 +849,124 @@ jobs:
             aws s3 sync "$SRC" "$DEST" --region "$REGION" --delete
           fi
 
-      - name: Smoke test — verify live site is reachable
+      # Invalidation now runs BEFORE verification, and records the invalidation
+      # id so the verification step can wait for it. The old order was
+      # promote → smoke → invalidate, which meant the smoke test read the
+      # edge while it was still serving the PREVIOUS deploy's cached object:
+      # the one request in the whole pipeline that was guaranteed not to see
+      # what had just been published.
+      - name: Invalidate CloudFront cache
+        id: invalidate
         env:
           CF_DISTRIBUTION_ID: ${{ secrets.CF_DISTRIBUTION_ID }}
-          GITHUB_ENV_NAME:    ${{ matrix.deployment.github_env }}
-          SMOKE_PATHS:        ${{ matrix.deployment.smoke_paths }}
-          SKIP_SMOKE:         ${{ matrix.deployment.skip_smoke }}
+          CF_PATHS:           ${{ matrix.deployment.cloudfront_paths }}
         run: |
           set -euo pipefail
-          # Dev environments have WAF IP allowlists that block GH Actions runners.
-          # Additionally, CloudFront custom_error_response maps WAF-403 → 404, so
-          # the actual status code is unpredictable for dev. Skip smoke tests for dev;
-          # the successful Build & Upload Artifact job already validates OIDC auth and
-          # S3 write permissions — which is the meaningful deployment check.
-          if [[ "$GITHUB_ENV_NAME" == *"-dev" ]]; then
-            echo "Skipping smoke test for dev environment (WAF IP allowlist active; CloudFront converts WAF-403 to 404)."
-            exit 0
-          fi
-          # Inventory opt-in for IP-restricted prod sites (e.g. dashboard.ffreis.com).
-          # The GH runner IP isn't in the WAF allowlist so smoke would always fail.
-          # Build + S3 upload + CloudFront invalidation succeeding is the meaningful
-          # check for these sites. Set publish.skip_smoke: true in inventory yaml.
+          # CF_PATHS is space-joined; pass unquoted so each path is a separate
+          # argument. scan-fix(shell:unquoted-glob): an unquoted "/*" (the
+          # fleet default) also triggers pathname expansion against the
+          # runner's real filesystem root (e.g. /home, /opt, /usr) instead of
+          # the literal CloudFront path "/*" — set -f disables that expansion
+          # while keeping the intended word-splitting.
+          set -f
+          # shellcheck disable=SC2086
+          INVALIDATION_ID=$(aws cloudfront create-invalidation \
+            --distribution-id "$CF_DISTRIBUTION_ID" \
+            --paths $CF_PATHS \
+            --query 'Invalidation.Id' --output text)
+          set +f
+          echo "Created invalidation ${INVALIDATION_ID} for paths: ${CF_PATHS}"
+          echo "invalidation_id=${INVALIDATION_ID}" >> "$GITHUB_OUTPUT"
+
+      # ── the real post-deploy gate ────────────────────────────────────────
+      #
+      # Asserts that the bytes the edge serves are the bytes this run just
+      # promoted, by comparing a sha256 per HTML file against the staged
+      # artifact. This replaces a status-code smoke test that could not fail
+      # on the thing that actually goes wrong.
+      #
+      # On 2026-10-18 forma.ffreis.com/login.html was found serving markup a
+      # fix had removed six days earlier, with every deploy in between
+      # reporting success. The old gate missed it three independent ways:
+      #
+      #   1. it asserted only `[[ "$STATUS" =~ ^[23] ]]`, and stale content
+      #      returns 200;
+      #   2. it ran BEFORE the invalidation, so it read the pre-deploy cached
+      #      object by construction;
+      #   3. `smoke_paths` defaulted to ["/"], so a deployment published under
+      #      `prefix: en/` had its gate pointed at the bucket ROOT — a path
+      #      that deployment does not maintain at all.
+      #
+      # Every value arrives through `env:` so the body carries no `${{ }}`
+      # expression: that is both the injection-safe shape and what makes it
+      # runnable outside Actions, which is how
+      # tests/test_verify_live_content.py tests this step as it ships —
+      # including the case that matters, a 200 serving last week's bytes.
+      - name: Verify live content matches the promoted artifact
+        env:
+          BUILDS_BUCKET:            ${{ matrix.deployment.builds_bucket }}
+          BUILD_SHA:                ${{ github.event.client_payload.sha || github.sha }}
+          CF_DISTRIBUTION_ID:       ${{ secrets.CF_DISTRIBUTION_ID }}
+          CF_INVALIDATION_ID:       ${{ steps.invalidate.outputs.invalidation_id }}
+          # Optional per-environment secret. *.ffreis.com dev sites sit behind a
+          # CloudFront viewer-request gate that compares a `dev_access` cookie
+          # against the distribution's secret; without it the edge answers 403
+          # with an empty body. An unset secret resolves to "" — the body then
+          # reports a loud SKIP rather than a silent pass.
+          DEV_ACCESS_TOKEN:         ${{ secrets.DEV_ACCESS_TOKEN }}
+          GITHUB_ENV_NAME:          ${{ matrix.deployment.github_env }}
+          PUBLISH_PREFIX:           ${{ matrix.deployment.publish_prefix }}
+          REGION:                   ${{ matrix.deployment.builds_region }}
+          SKIP_SMOKE:               ${{ matrix.deployment.skip_smoke }}
+          SMOKE_PATHS:              ${{ matrix.deployment.smoke_paths }}
+          STAGING_PREFIX:           ${{ matrix.deployment.staging_prefix }}
+          # Bound the edge requests a promote job makes. The cap keeps the
+          # deployment's entry point and error page first, then walks the rest
+          # of the artifact in sorted order.
+          VERIFY_MAX_FILES:         '40'
+          # The invalidation wait below is the primary synchronisation. This is
+          # the fallback for a role without cloudfront:GetInvalidation: re-check
+          # only the still-mismatching paths until the deadline, so ordinary
+          # propagation lag cannot red a deploy while a genuinely unmaintained
+          # object — never invalidated, as in the incident — still fails.
+          VERIFY_DEADLINE_SECONDS:  '120'
+          VERIFY_RETRY_SLEEP:       '15'
+        run: |
+          set -euo pipefail
+
+          summary() { cat >> "${GITHUB_STEP_SUMMARY:-/dev/null}"; }
+
+          # ── 0. inventory opt-out ──────────────────────────────────────────
+          # publish.skip_smoke is for sites whose edge the runner genuinely
+          # cannot reach (WAF IP allowlist on prod, e.g. dashboard.ffreis.com).
+          # It is now a loud warning: it disables the fleet's only check that
+          # the deploy changed what the site serves.
           if [[ "$SKIP_SMOKE" == "true" ]]; then
-            echo "Skipping smoke test (inventory publish.skip_smoke=true; IP-restricted prod site)."
+            echo "::warning title=Live content NOT verified::inventory publish.skip_smoke=true for ${GITHUB_ENV_NAME}; the live site was never compared against the promoted artifact."
+            # shellcheck disable=SC2016  # backticks are markdown code spans, not command substitution
+            {
+              printf '### Live content verification: SKIPPED\n\n'
+              printf '`publish.skip_smoke: true` in inventory for `%s`. The promoted artifact was **not** compared against what the edge serves.\n' "$GITHUB_ENV_NAME"
+            } | summary
             exit 0
           fi
-          # Resolve primary domain: first non-www alias, or the CloudFront *.cloudfront.net domain.
+
+          # ── 1. wait for the invalidation this run created ─────────────────
+          if [[ -z "$CF_INVALIDATION_ID" ]]; then
+            echo "No invalidation id was captured from the previous step — refusing to verify a possibly-cached edge." >&2
+            exit 1
+          fi
+          echo "Waiting for CloudFront invalidation ${CF_INVALIDATION_ID} to complete ..."
+          if aws cloudfront wait invalidation-completed \
+               --distribution-id "$CF_DISTRIBUTION_ID" \
+               --id "$CF_INVALIDATION_ID"; then
+            echo "Invalidation ${CF_INVALIDATION_ID} completed; the edge is clear."
+          else
+            echo "::warning title=Could not wait on the invalidation::aws cloudfront wait invalidation-completed failed for ${CF_INVALIDATION_ID} (the deploy role may lack cloudfront:GetInvalidation). Falling back to re-checking mismatches until the ${VERIFY_DEADLINE_SECONDS}s deadline."
+          fi
+
+          # ── 2. resolve the public domain ──────────────────────────────────
+          # First non-www alias, or the CloudFront *.cloudfront.net domain.
           ALIASES=$(aws cloudfront get-distribution \
             --id "$CF_DISTRIBUTION_ID" \
             --query 'Distribution.DistributionConfig.Aliases.Items' \
@@ -859,37 +983,372 @@ jobs:
           ")
           fi
           LIVE_URL="https://${DOMAIN}"
-          echo "Smoke testing ${LIVE_URL} (paths: ${SMOKE_PATHS}) ..."
-          FAIL=0
-          for path in $SMOKE_PATHS; do
-            STATUS=$(curl -s -o /dev/null -w '%{http_code}' --max-time 15 --connect-timeout 5 \
-              --location "${LIVE_URL}${path}" || echo "000")
-            if [[ "$STATUS" =~ ^[23] ]]; then
-              echo "  ok   ${path} → ${STATUS}"
-            else
-              echo "  FAIL ${path} → ${STATUS}"
-              FAIL=1
-            fi
-          done
-          if [[ "$FAIL" -eq 1 ]]; then
-            echo "Smoke test failed — the live site returned an unexpected status after promotion." >&2
+
+          # The URL space this deployment actually maintains. A deployment with
+          # `prefix: en/` is reachable at /en/... and nowhere else; verifying it
+          # at "/" tests an unrelated, unmanaged part of the bucket.
+          if [[ -n "$PUBLISH_PREFIX" ]]; then
+            URL_PREFIX="/${PUBLISH_PREFIX#/}"
+            URL_PREFIX="${URL_PREFIX%/}/"
+          else
+            URL_PREFIX="/"
+          fi
+
+          # ── 3. pull down the artifact that was just promoted ──────────────
+          # This is the same object set the promote step synced to the live
+          # bucket, read from the staging bucket at the same immutable
+          # <staging-prefix>/<sha7>/ key — so "what we expect to be live" is
+          # never a reconstruction, it is the artifact itself.
+          SHA7="${BUILD_SHA::7}"
+          SRC="s3://${BUILDS_BUCKET}/${STAGING_PREFIX}/${SHA7}/"
+          STAGED=$(mktemp -d)
+          aws s3 cp "$SRC" "$STAGED/" --recursive --region "$REGION" \
+            --exclude "*" --include "*.html" --only-show-errors
+
+          mapfile -t STAGED_HTML < <(cd "$STAGED" && find . -type f -name '*.html' -printf '%P\n' | LC_ALL=C sort)
+          if [[ "${#STAGED_HTML[@]}" -eq 0 ]]; then
+            echo "The promoted artifact at ${SRC} contains no HTML — nothing to verify, which is itself a broken deploy." >&2
             exit 1
           fi
 
-      - name: Invalidate CloudFront cache
+          # Entry point and error page first: those are the two objects a
+          # distribution resolves on its own (DefaultRootObject /
+          # CustomErrorResponses), so they must never fall off the end of the cap.
+          ORDERED=()
+          for want in "index.html" "404.html"; do
+            for f in "${STAGED_HTML[@]}"; do
+              [[ "$f" == "$want" ]] && ORDERED+=("$f")
+            done
+          done
+          for f in "${STAGED_HTML[@]}"; do
+            skip=
+            for already in ${ORDERED[@]+"${ORDERED[@]}"}; do
+              [[ "$f" == "$already" ]] && skip=1 && break
+            done
+            [[ -n "$skip" ]] || ORDERED+=("$f")
+          done
+
+          # ── 4. how to reach a gated site ──────────────────────────────────
+          CURL_AUTH=()
+          if [[ -n "$DEV_ACCESS_TOKEN" ]]; then
+            CURL_AUTH=(--cookie "dev_access=${DEV_ACCESS_TOKEN}")
+            echo "Using the dev_access cookie from the DEV_ACCESS_TOKEN secret."
+          fi
+
+          # --location: a clean-URL site may 301 /x/index.html → /x/. Following
+          # it is safe because the sha256 below, not the status, is the
+          # assertion — the redirect target must still serve the promoted bytes.
+          # Accept-Encoding: identity so CloudFront compression cannot change
+          # the bytes we hash; no-cache so we measure the edge, not a proxy.
+          fetch() {
+            curl -s -o "$2" -w '%{http_code}' \
+              --max-time 30 --connect-timeout 10 --location \
+              -H 'Accept-Encoding: identity' \
+              -H 'Cache-Control: no-cache' \
+              -H 'Pragma: no-cache' \
+              ${CURL_AUTH[@]+"${CURL_AUTH[@]}"} \
+              "$1" || echo "000"
+          }
+
+          # A viewer-request gate rejects BEFORE the origin, so CustomErrorResponses
+          # never rewrite its answer: "403 with a zero-length body" is a reliable
+          # signature for "gated", distinct from a missing object (which reaches
+          # the origin and comes back as the /404.html error page, with a body).
+          PROBE_BODY=$(mktemp)
+          PROBE_URL="${LIVE_URL}${URL_PREFIX}${ORDERED[0]}"
+          PROBE_STATUS=$(fetch "$PROBE_URL" "$PROBE_BODY")
+          PROBE_SIZE=$(stat -c %s "$PROBE_BODY")
+          if [[ "$PROBE_STATUS" == "403" && "$PROBE_SIZE" -eq 0 ]]; then
+            if [[ -n "$DEV_ACCESS_TOKEN" ]]; then
+              echo "::error title=dev_access token rejected::${PROBE_URL} answered 403 with an empty body even though DEV_ACCESS_TOKEN was supplied — the token does not match this distribution's gate secret, so live content could not be verified."
+              exit 1
+            fi
+            echo "::warning title=Live content NOT verified (site is gated)::${PROBE_URL} answered 403 with an empty body: this distribution's viewer-request gate rejected an unauthenticated request and no DEV_ACCESS_TOKEN secret is set on environment ${GITHUB_ENV_NAME}. The promoted artifact was NOT compared against what the edge serves."
+            # shellcheck disable=SC2016  # backticks are markdown code spans, not command substitution
+            {
+              printf '### Live content verification: SKIPPED (gated)\n\n'
+              printf '`%s` answered **403 with an empty body** — the CloudFront viewer-request gate rejected an unauthenticated request.\n\n' "$PROBE_URL"
+              printf 'No `DEV_ACCESS_TOKEN` secret is configured on environment `%s`, so the promoted artifact was **not** compared against what the edge serves.\n\n' "$GITHUB_ENV_NAME"
+              printf 'Add a `DEV_ACCESS_TOKEN` secret holding the `dev_access` value for this distribution to that GitHub environment to turn this into a real check.\n'
+            } | summary
+            exit 0
+          fi
+
+          # ── 5. compare the edge against the artifact, byte for byte ───────
+          echo "Verifying ${LIVE_URL}${URL_PREFIX} against ${SRC} (${#STAGED_HTML[@]} HTML file(s), cap ${VERIFY_MAX_FILES}) ..."
+          PENDING=("${ORDERED[@]:0:VERIFY_MAX_FILES}")
+          CHECKED="${#PENDING[@]}"
+          DEADLINE=$(( $(date +%s) + VERIFY_DEADLINE_SECONDS ))
+          declare -A REASON=()
+          FAILED=()
+          ATTEMPT=0
+          while :; do
+            ATTEMPT=$(( ATTEMPT + 1 ))
+            FAILED=()
+            for rel in "${PENDING[@]}"; do
+              URL="${LIVE_URL}${URL_PREFIX}${rel}"
+              BODY=$(mktemp)
+              STATUS=$(fetch "$URL" "$BODY")
+              WANT=$(sha256sum "${STAGED}/${rel}" | cut -d' ' -f1)
+              GOT=$(sha256sum "$BODY" | cut -d' ' -f1)
+              rm -f "$BODY"
+              if [[ ! "$STATUS" =~ ^2 ]]; then
+                REASON["$rel"]="HTTP ${STATUS} (unreachable)"
+                FAILED+=("$rel")
+              elif [[ "$WANT" != "$GOT" ]]; then
+                # The incident's exact signature: a 200 whose bytes are not the
+                # ones just promoted.
+                REASON["$rel"]="HTTP ${STATUS} but STALE — artifact sha256 ${WANT}, live sha256 ${GOT}"
+                FAILED+=("$rel")
+              else
+                echo "  ok      ${URL_PREFIX}${rel} → ${STATUS}, sha256 matches the promoted artifact"
+              fi
+            done
+            [[ "${#FAILED[@]}" -eq 0 ]] && break
+            [[ "$(date +%s)" -ge "$DEADLINE" ]] && break
+            echo "  ...     ${#FAILED[@]} path(s) not yet serving the promoted bytes; re-checking in ${VERIFY_RETRY_SLEEP}s (attempt ${ATTEMPT})"
+            sleep "$VERIFY_RETRY_SLEEP"
+            PENDING=("${FAILED[@]}")
+          done
+
+          # ── 6. declared smoke_paths, as URL shapes ────────────────────────
+          # The artifact walk above covers every page by its literal key. These
+          # are the URL forms the inventory declares (clean URLs, redirects),
+          # which exercise edge behaviour no object key does.
+          for path in $SMOKE_PATHS; do
+            BODY=$(mktemp)
+            STATUS=$(fetch "${LIVE_URL}${path}" "$BODY")
+            rm -f "$BODY"
+            if [[ "$STATUS" =~ ^2 ]]; then
+              echo "  ok      ${path} → ${STATUS} (declared smoke path)"
+            else
+              REASON["$path"]="HTTP ${STATUS} (declared smoke path unreachable)"
+              FAILED+=("$path")
+            fi
+          done
+
+          if [[ "${#FAILED[@]}" -gt 0 ]]; then
+            echo "" >&2
+            echo "Live verification FAILED — the edge is not serving the artifact this run promoted:" >&2
+            SUMMARY_MD=$(mktemp)
+            {
+              echo "### Live content verification: FAILED"
+              echo ""
+              echo "\`${LIVE_URL}${URL_PREFIX}\` is not serving the artifact promoted by this run (\`${SRC}\`)."
+              echo ""
+              echo "| path | finding |"
+              echo "| --- | --- |"
+            } > "$SUMMARY_MD"
+            for rel in "${FAILED[@]}"; do
+              echo "  FAIL    ${rel} → ${REASON[$rel]}" >&2
+              echo "| \`${rel}\` | ${REASON[$rel]} |" >> "$SUMMARY_MD"
+            done
+            summary < "$SUMMARY_MD"
+            # Not "N of CHECKED": FAILED can also carry declared smoke paths,
+            # which are not part of the artifact count.
+            echo "::error title=Live content does not match the promoted artifact::${#FAILED[@]} path(s) are stale or unreachable at ${LIVE_URL}${URL_PREFIX} after invalidation ${CF_INVALIDATION_ID} completed (${CHECKED} artifact file(s) plus the declared smoke paths were checked)."
+            exit 1
+          fi
+
+          echo "All ${CHECKED} verified path(s) serve exactly the promoted artifact."
+          # shellcheck disable=SC2016  # backticks are markdown code spans, not command substitution
+          {
+            printf '### Live content verification: PASSED\n\n'
+            printf '`%s` of `%s` HTML file(s) under `%s` match the promoted artifact byte for byte (sha256), after invalidation `%s` completed.\n' \
+              "$CHECKED" "${#STAGED_HTML[@]}" "$URL_PREFIX" "$CF_INVALIDATION_ID"
+          } | summary
+
+      # ── orphan scan ──────────────────────────────────────────────────────
+      #
+      # An object in the publish bucket outside every prefix this site declares
+      # is maintained by nothing: no sync overwrites it, no invalidation clears
+      # it, so it serves whatever bytes it was last given, forever. That is the
+      # state forma-dev's bucket root was in — 60 keys from one 2026-10-12
+      # deploy, while `en/` and `pt/` were kept current around them.
+      #
+      # Why this warns rather than fails, except for one case:
+      #
+      #   * The root of a prefixed site is NOT garbage. A distribution resolves
+      #     `DefaultRootObject` and every `CustomErrorResponses` page at the
+      #     bucket ROOT, so those keys must exist outside all deployment
+      #     prefixes. "orphan ⇒ fail" would red every prefixed site forever and
+      #     "orphan ⇒ delete" would break the entry point and the error page.
+      #     Those keys are therefore read from the live distribution and
+      #     reported as `held`, never as a problem.
+      #   * A bucket may also hold deliberate extras — a `js/` prefix shared
+      #     between languages, a verification file. Failing on those would train
+      #     whoever reads the result to ignore it.
+      #
+      # The one case that DOES fail is a SHADOW orphan: an unmanaged key whose
+      # same relative path also exists inside a declared prefix. `login.html`
+      # existing at both `/login.html` (unmanaged, frozen) and `/en/login.html`
+      # (maintained, current) is not an extra file — it is a second, stale copy
+      # of a live page, reachable by URL, which is exactly the incident. It
+      # cannot fire on a legitimately-placed root file that has no managed
+      # counterpart, and it never fires on the distribution's own held keys.
+      - name: Scan publish bucket for unmanaged (orphan) objects
         env:
           CF_DISTRIBUTION_ID: ${{ secrets.CF_DISTRIBUTION_ID }}
-          CF_PATHS:           ${{ matrix.deployment.cloudfront_paths }}
+          LIVE_BUCKET:        ${{ secrets.S3_WEBSITE_BUCKET }}
+          MANAGED_PREFIXES:   ${{ matrix.deployment.managed_prefixes }}
+          PUBLISH_REGION:     ${{ matrix.deployment.publish_region }}
+          ROOT_IS_MANAGED:    ${{ matrix.deployment.root_is_managed }}
+          # Escalation switch, deliberately OFF. 9 of the 13 website entries in
+          # the inventory publish only under prefixes today, and several of those
+          # buckets still hold objects from a pre-prefix layout — so turning this
+          # on now would red much of the fleet, prod included, for a condition no
+          # deploy can remediate (promote skips `--delete` whenever siblings share
+          # a bucket, precisely so one language cannot wipe another's content).
+          # Flip it to 'true' per-site once that bucket's root has been cleaned
+          # up, and the scan becomes a gate that keeps it clean.
+          FAIL_ON_DIVERGENT_SHADOW: 'false'
         run: |
-          # CF_PATHS is space-joined; pass unquoted so each path is a separate
-          # argument. scan-fix(shell:unquoted-glob): an unquoted "/*" (the
-          # fleet default) also triggers pathname expansion against the
-          # runner's real filesystem root (e.g. /home, /opt, /usr) instead of
-          # the literal CloudFront path "/*" — set -f disables that expansion
-          # while keeping the intended word-splitting.
-          set -f
-          # shellcheck disable=SC2086
-          aws cloudfront create-invalidation \
-            --distribution-id "$CF_DISTRIBUTION_ID" \
-            --paths $CF_PATHS
-          set +f
+          set -euo pipefail
+
+          # A deployment publishing at the bucket root claims every key, so
+          # there is nothing outside the managed space to find.
+          if [[ "$ROOT_IS_MANAGED" == "true" || -z "$MANAGED_PREFIXES" ]]; then
+            echo "This site publishes at the bucket root — no key lies outside a declared deployment prefix."
+            exit 0
+          fi
+
+          # Read the keys the distribution resolves for itself. get-distribution
+          # is the same call the verification step already makes, so this adds no
+          # new IAM action.
+          DIST_JSON=$(aws cloudfront get-distribution --id "$CF_DISTRIBUTION_ID" --output json)
+          # ETag comes along for free here and is the content discriminator below.
+          BUCKET_OBJECTS=$(aws s3api list-objects-v2 \
+            --bucket "$LIVE_BUCKET" --region "$PUBLISH_REGION" \
+            --query 'Contents[].[Key,ETag,LastModified]' --output json)
+
+          BUCKET_OBJECTS="$BUCKET_OBJECTS" DIST_JSON="$DIST_JSON" python3 - <<'PYEOF'
+          import json, os, sys
+
+          rows_in = json.loads(os.environ["BUCKET_OBJECTS"] or "null") or []
+          dist = json.loads(os.environ["DIST_JSON"])["Distribution"]["DistributionConfig"]
+          prefixes = sorted({p for p in os.environ["MANAGED_PREFIXES"].split() if p})
+          bucket = os.environ["LIVE_BUCKET"]
+          fail_on_divergent = os.environ["FAIL_ON_DIVERGENT_SHADOW"] == "true"
+
+          etag = {k: (e or "").strip('"') for k, e, _ in rows_in}
+          modified = {k: m for k, _, m in rows_in}
+          keys = [k for k, _, _ in rows_in]
+          keyset = set(keys)
+
+          # Keys the distribution itself resolves at the bucket ROOT, read from
+          # the live config rather than hardcoded. These MUST exist outside every
+          # deployment prefix: a prefixed site's DefaultRootObject and its
+          # CustomErrorResponses pages are root objects by definition (on
+          # ffreis-urbs-dev the root index.html is Terraform-owned and serves as
+          # the distribution's error document). They are held, never a finding,
+          # and never a deletion candidate.
+          held = set()
+          root_object = (dist.get("DefaultRootObject") or "").lstrip("/")
+          if root_object:
+              held.add(root_object)
+          for err in (dist.get("CustomErrorResponses") or {}).get("Items") or []:
+              page = (err.get("ResponsePagePath") or "").lstrip("/")
+              if page:
+                  held.add(page)
+
+          orphans = [
+              k for k in keys
+              if not k.endswith("/") and not any(k.startswith(p) for p in prefixes)
+          ]
+
+          # A SHADOW orphan is the same relative path served twice: once from a
+          # maintained prefix, once from the unmaintained root. Compare ETags —
+          # for these single-part HTML uploads an ETag is the content MD5, so a
+          # differing ETag means the two copies genuinely serve different bytes
+          # and the unmanaged one is stale. An ETag containing "-" is a multipart
+          # upload whose ETag is not a content hash; those are reported as
+          # "unknown" rather than guessed at.
+          divergent, identical, unknown, other = [], [], [], []
+          for k in orphans:
+              if k in held:
+                  continue
+              twins = [p for p in prefixes if f"{p}{k}" in keyset]
+              if not twins:
+                  other.append(k)
+                  continue
+              mine = etag.get(k, "")
+              theirs = [etag.get(f"{p}{k}", "") for p in twins]
+              if "-" in mine or any("-" in t for t in theirs):
+                  unknown.append((k, twins))
+              elif all(mine == t for t in theirs):
+                  identical.append((k, twins))
+              else:
+                  divergent.append((k, twins))
+
+          held_present = sorted(held & keyset)
+          counts = [
+              f"Declared deployment prefixes: {' '.join(prefixes)}",
+              f"Keys outside every declared prefix: {len(orphans)}",
+              f"  held by the distribution (DefaultRootObject / error pages): {len(held_present)}",
+              f"  shadow copies serving DIFFERENT bytes than the maintained page: {len(divergent)}",
+              f"  shadow copies byte-identical to the maintained page: {len(identical)}",
+              f"  shadow copies whose ETag cannot be compared (multipart): {len(unknown)}",
+              f"  other unmanaged keys (no maintained counterpart): {len(other)}",
+          ]
+          print(f"Publish bucket: s3://{bucket}")
+          for line in counts:
+              print(line)
+          for k in held_present:
+              print(f"  held      {k}  (resolved by the distribution itself; must stay)")
+          for k in sorted(other):
+              print(f"  unmanaged {k}  (maintained by no deployment; serves its current bytes indefinitely)")
+          for k, twins in sorted(identical):
+              print(f"  dup       {k}  (byte-identical to {' '.join(twins)}{k})")
+          for k, twins in sorted(unknown):
+              print(f"  unknown   {k}  (also under {' '.join(twins)}; multipart ETag, not comparable)")
+          for k, twins in sorted(divergent):
+              print(
+                  f"  STALE     {k}  (last modified {modified.get(k)}) serves different bytes than "
+                  f"{' '.join(f'{p}{k}' for p in twins)} — a second, unmaintained copy of a live page"
+              )
+
+          md = ["### Unmanaged objects in the publish bucket", "", *(f"- {line}" for line in counts)]
+          if divergent:
+              md += [
+                  "",
+                  "#### Stale shadow copies",
+                  "",
+                  "Each key below is a second copy of a page that **is** kept current under a declared "
+                  "prefix, but lies outside every prefix itself — so no sync overwrites it and no "
+                  "invalidation clears it. It serves different bytes than the maintained copy, which means "
+                  "it is serving stale markup at a live URL right now.",
+                  "",
+                  "| unmanaged key | last modified | maintained copy |",
+                  "| --- | --- | --- |",
+                  *(
+                      f"| `{k}` | {modified.get(k)} | {' '.join(f'`{p}{k}`' for p in twins)} |"
+                      for k, twins in sorted(divergent)
+                  ),
+                  "",
+                  "Remediation is one of: delete these keys, or declare a deployment that publishes to the "
+                  "bucket root so they are maintained. Do **not** blanket-delete the root — the keys listed "
+                  "as `held` above are the distribution's own DefaultRootObject and error pages.",
+              ]
+          with open(os.environ.get("GITHUB_STEP_SUMMARY", "/dev/null"), "a") as f:
+              f.write("\n".join(md) + "\n")
+
+          if other or identical or unknown:
+              print(
+                  "::warning title=Unmanaged objects in the publish bucket::"
+                  f"{len(other) + len(identical) + len(unknown)} key(s) in s3://{bucket} lie outside every "
+                  f"declared deployment prefix ({' '.join(prefixes)}). Nothing syncs or invalidates them, so "
+                  "they will serve their current bytes indefinitely."
+              )
+          if divergent:
+              # Loud, specific, and attached to the run — but not fatal by
+              # default. See FAIL_ON_DIVERGENT_SHADOW above for why.
+              print(
+                  "::error title=Stale shadow copies serving a live URL::"
+                  f"{len(divergent)} key(s) in s3://{bucket} duplicate a page kept current under a declared "
+                  f"prefix ({' '.join(prefixes)}) but are maintained by no deployment, and serve DIFFERENT "
+                  f"bytes: {', '.join(k for k, _ in sorted(divergent))}. "
+                  "Delete them, or give the bucket root a deployment."
+              )
+              if fail_on_divergent:
+                  sys.exit(1)
+          PYEOF

@@ -115,14 +115,127 @@ dispatch payload) so it can never disagree with the tree that was compiled.
 
 Prod deployments deliberately get **no** stamp: the file is served publicly from
 the site root, and a `github_environment` ending in `-dev` is the same dev/prod
-discriminator the promote job's smoke-test skip and the `content_source` guard
-already use. If a prod site ever needs a stamp, turn that condition into an
-inventory-declared field rather than dropping the gate.
+discriminator the `content_source` guard already uses. If a prod site ever needs
+a stamp, turn that condition into an inventory-declared field rather than
+dropping the gate.
+
+(The promote job's post-deploy check used to key off that same `-dev` suffix to
+skip itself entirely. It no longer does — see "Post-deploy verification" below.)
 
 The key names (`sha`, `branch`, `deployedAt`, `website`, `deployment`) are a
 consumer contract — renaming one breaks every site reading the file.
 `tests/test_deploy_build_info.py` executes the step's real script body and
 asserts the shape; run it with `make test`.
+
+## Post-deploy verification (the promote job's real gate)
+
+The promote job's step order is **promote → invalidate → verify → orphan scan**.
+Verification asserts that the bytes the edge serves are the bytes the run just
+promoted: it downloads the staged artifact's HTML from
+`s3://<builds-bucket>/<staging-prefix>/<sha7>/` and compares a **sha256 per
+file** against what the live URL returns. A 200 serving last week's bytes fails.
+
+### Why it is shaped this way
+
+It replaces a step named "Smoke test — verify live site is reachable" that
+could not fail on the thing that actually goes wrong. On 2026-10-18
+forma.ffreis.com was found serving, at `/login.html` and `/account.html`, markup
+a fix had removed six days earlier — every deploy in between reported success.
+The old gate missed it four independent ways:
+
+1. **It asserted only the status code** (`[[ "$STATUS" =~ ^[23] ]]`). A stale
+   object returns 200.
+2. **It ran BEFORE the invalidation.** The order was promote → smoke →
+   invalidate, so the one request in the pipeline that was supposed to confirm
+   the deploy was the one guaranteed to read the *previous* deploy's cached
+   object.
+3. **`smoke_paths` defaulted to `["/"]`.** A deployment publishing under
+   `publish.prefix: en/` therefore had its only check aimed at the bucket
+   **root** — which that deployment never writes to.
+4. **It skipped itself outright on every `-dev` environment.** forma-dev is
+   `github_environment: forma-dev`, so for the site the incident happened on,
+   reasons 1-3 never even came into play: the step exited 0 at its first `if`.
+
+So the three properties to preserve are: content not status; after the
+invalidation has *completed*; at the prefix the deployment actually maintains.
+`tests/test_verify_live_content.py` executes the real step bodies against
+stubbed `aws`/`curl` and asserts each one — including
+`test_a_200_serving_stale_bytes_fails`, which is the incident's exact shape.
+
+### Synchronisation
+
+The invalidate step is `id: invalidate` and publishes the invalidation id;
+verification waits on it with `aws cloudfront wait invalidation-completed`
+rather than sleeping. If that call fails — a deploy role without
+`cloudfront:GetInvalidation` — the step **warns and keeps going**, then
+re-checks only the still-mismatching paths until `VERIFY_DEADLINE_SECONDS`.
+That way ordinary propagation lag cannot red a deploy, while an object that is
+never invalidated at all (the incident) still fails. Do not replace the wait
+with a sleep, and do not make the fallback unconditional.
+
+### `smoke_paths` default is derived from the prefix
+
+`/{prefix}index.html`, not `/{prefix}/`: CloudFront's `DefaultRootObject`
+applies **only** to the distribution root, so `/en/` has no guaranteed mapping
+to `en/index.html` unless the site also runs a directory-index function. The
+explicit key is the one URL certain to exist for both archetypes (clean-URL and
+flat-`.html`). An inventory-declared `smoke_paths` still wins — `ffreis.yaml`,
+`flemming.yaml` and `petlook.yaml` declare their own, with `"/"` last.
+
+### Gated dev sites
+
+`*.ffreis.com` dev sites sit behind a CloudFront **viewer-request** gate that
+compares a `dev_access` cookie against the distribution's secret. Nothing in the
+inventory configures it (the mechanism is Terraform-owned), so verification
+reads an **optional** `DEV_ACCESS_TOKEN` secret per GitHub environment and sends
+it as a cookie. No environment has that secret today.
+
+The gate answers **403 with a zero-length body**, and it answers *before* the
+origin, so `CustomErrorResponses` never rewrite it — that is what makes
+"403 + empty body" a reliable signature for "gated", distinct from a missing
+object (which reaches the origin and comes back as the `/404.html` page, with a
+body). On that signature:
+
+* **no token set** → a loud `::warning` plus a step-summary block saying the
+  artifact was not compared. A reported skip is acceptable; a silent pass is
+  not. Setting `DEV_ACCESS_TOKEN` on the environment turns it into a real check.
+* **token set but rejected** → **fail**. Somebody believed that site was being
+  verified.
+
+### Orphan scan: why it warns rather than fails
+
+An object in the publish bucket outside every prefix the site declares is
+maintained by nothing — no sync overwrites it, no invalidation clears it — so it
+serves its current bytes indefinitely. That was forma-dev's bucket root: 60 keys
+from one 2026-10-12 deploy, while `en/` and `pt/` were kept current around them.
+
+The scan classifies, it does not blanket-condemn:
+
+* **held** — the distribution's own `DefaultRootObject` and
+  `CustomErrorResponses` pages, read from the **live distribution config**, not
+  hardcoded. On a prefixed site these are root objects *by definition*
+  (ffreis-urbs-dev's root `index.html` is Terraform-owned and serves as the
+  error document). Never a finding, never a deletion candidate. This is why
+  "orphan ⇒ delete" is wrong.
+* **shadow** — an unmanaged key whose same relative path also exists under a
+  declared prefix, i.e. a second copy of a live page. ETags discriminate:
+  differing ETag ⇒ genuinely stale (`login.html` vs `en/login.html`); equal ⇒
+  harmless duplicate; multipart (`-` in the ETag) ⇒ reported as uncomparable
+  rather than guessed at.
+* **other** — unmanaged with no maintained counterpart (a shared `js/` prefix,
+  a verification file). Warn only.
+
+A divergent shadow is reported as an `::error` annotation with a step-summary
+table, but **does not fail the deploy** by default. Three reasons:
+**9 of the 13** website entries in the inventory publish only under prefixes
+today — there is not a single empty-prefix deployment anywhere — and several of
+those buckets still hold objects from a pre-prefix layout, so failing would red
+much of the fleet, prod included; the condition is **pre-existing bucket state
+that the deploy itself cannot remediate** (promote deliberately skips `--delete`
+whenever siblings share a bucket, so one language cannot wipe another's
+content); and a gate everyone must bypass is worse than a warning nobody can
+mistake for a pass. `FAIL_ON_DIVERGENT_SHADOW` in the step's `env:` flips it to
+a hard gate — do that per site once that bucket's root has been cleaned up.
 
 ## Compiler embedding flags in inventory YAML
 

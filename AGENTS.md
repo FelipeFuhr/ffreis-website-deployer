@@ -32,10 +32,10 @@ push to main     →  website_name = <site>       →  <site>.yaml       →  gi
 
 | GitHub environment | Site | AWS resources |
 |---|---|---|
-| `prod` | flemming | `flemming-*-prod`, `flemming.com.br` |
-| `flemming-dev` | flemming-dev | `flemming-*-dev`, `<dev-domain>` |
-| `petlook-prod` | petlook | `petlook-*-prod`, `petlook.app` |
-| `petlook-dev` | petlook-dev | `petlook-*-dev`, `<dev-domain>` |
+| `prod` | product-a | `product-a-*-prod`, `<prod-domain>` |
+| `product-a-dev` | product-a-dev | `product-a-*-dev`, `<dev-domain>` |
+| `product-b-prod` | product-b | `product-b-*-prod`, `<prod-domain>` |
+| `product-b-dev` | product-b-dev | `product-b-*-dev`, `<dev-domain>` |
 | `ffreis-prod` | ffreis | `ffreis-*-prod`, `ffreis.com` |
 | `ffreis-dev` | ffreis-dev | `ffreis-*-dev`, `<dev-domain>` |
 
@@ -273,7 +273,7 @@ domain yet). It maps to the compiler's `-allow-blanket-robots-disallow` flag.
 The fleet has two shapes, and the deployer supports both. Which one a site is
 determines whether `sources.data` exists.
 
-**Split template+data** (`ffreis-website`, `flemming-website`, `petlook-website`) — page copy lives in a separate `*-data` repo. The deployer
+**Split template+data** (`ffreis-website`, `product-a-website`, `product-b-website`) — page copy lives in a separate `*-data` repo. The deployer
 checks it out and copies it into `checkout/website/src/data/`, and the compiler
 picks it up from that default location. No `-site-data` flag is involved.
 

@@ -149,8 +149,8 @@ def resolve(name, dep):
         "compiler_ref": top_compiler.get("ref", "main"),
         # Every existing site's templates assume clean URLs (the historical,
         # unconditional default), so this only turns OFF -clean-urls, and only
-        # when a site's own templates use flat .html-style hrefs instead (e.g.
-        # forma-dev — see its inventory entry for why). Mirrors deploy.yml.
+        # when a site's own templates use flat .html-style hrefs instead (see
+        # that site's inventory entry for why). Mirrors deploy.yml.
         "clean_urls": "" if top_compiler.get("clean_urls", True) is False else "true",
         "js_inline": str(top_compiler.get("js_inline_threshold", "")),
         "js_shared_inline": str(top_compiler.get("js_shared_inline_threshold", "")),

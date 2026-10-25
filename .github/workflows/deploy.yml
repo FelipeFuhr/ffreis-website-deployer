@@ -200,6 +200,10 @@ jobs:
                   # Set sources.shared_js: {repo: ..., ref: ...} in the inventory YAML.
                   "shared_js_repo": top_sources.get("shared_js", {}).get("repo", ""),
                   "shared_js_ref":  top_sources.get("shared_js", {}).get("ref",  "main"),
+                  # Optional allow-list of shared *.js filenames to inject.
+                  # Empty = every *.js in the shared repo, which is the
+                  # historical behaviour and stays the default.
+                  "shared_js_files": " ".join(top_sources.get("shared_js", {}).get("files", [])),
                   # ffreis-tracker-sdk injection. Set tracker: {enabled, sdk_version, site_id,
                   # endpoint, cdn_base} in the inventory YAML. All values are top-level only
                   # (not per-deployment) — the same SDK version and endpoint serve all langs.
@@ -534,10 +538,35 @@ jobs:
 
       - name: Inject shared JS into website
         if: matrix.deployment.shared_js_repo != ''
+        env:
+          SHARED_JS_FILES: ${{ matrix.deployment.shared_js_files }}
         run: |
           set -euo pipefail
           mkdir -p checkout/website/src/assets/js
-          cp checkout/shared-js/*.js checkout/website/src/assets/js/
+
+          # Copying every *.js from the shared repo only works while every
+          # consumer references every file. The compiler fails the build on an
+          # unused local JS asset, so the moment the shared repo grows a second
+          # file, any site that does not reference BOTH stops building —
+          # a break in a repo whose own diff is empty.
+          #
+          # `sources.shared_js.files` in the inventory is the opt-in fix: list
+          # the filenames this site actually loads. Omitted means "all", which
+          # is what every existing entry gets.
+          if [[ -n "$SHARED_JS_FILES" ]]; then
+            for f in $SHARED_JS_FILES; do
+              if [[ ! -f "checkout/shared-js/$f" ]]; then
+                echo "::error::shared_js.files lists '$f', which does not exist in ${{ matrix.deployment.shared_js_repo }}" >&2
+                exit 1
+              fi
+              cp "checkout/shared-js/$f" checkout/website/src/assets/js/
+            done
+            echo "injected shared JS (allow-list): $SHARED_JS_FILES"
+          else
+            cp checkout/shared-js/*.js checkout/website/src/assets/js/
+            echo "injected shared JS (all):"
+            find checkout/shared-js -maxdepth 1 -name '*.js' -printf '  %f\n' 
+          fi
 
       - name: Checkout posts repo
         if: matrix.deployment.posts_repo != ''

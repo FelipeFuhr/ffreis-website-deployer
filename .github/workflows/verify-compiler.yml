@@ -120,6 +120,12 @@ jobs:
                   "courses_ref":      d_src.get("courses", {}).get("ref",  top["courses"].get("ref",  "main")),
                   "shared_js_repo":   top["shared_js"].get("repo", ""),
                   "shared_js_ref":    top["shared_js"].get("ref",  "main"),
+                  # Must stay in step with deploy.yml: the injection step is a
+                  # byte-identical replica (enforced by the parity test), so if
+                  # this key is absent the replica silently copies EVERY shared
+                  # *.js while the real deploy copies only the allow-list, and
+                  # verifies a tree the deploy never builds.
+                  "shared_js_files":  " ".join(top["shared_js"].get("files", [])),
                   "site_data_common": top["website"].get("site_data", {}).get("common", ""),
                   "site_data_i18n":   top["website"].get("site_data", {}).get("i18n", ""),
                   # The compiler REPO still comes from inventory (owner drives
@@ -346,10 +352,35 @@ jobs:
 
       - name: Inject shared JS into website
         if: matrix.entry.shared_js_repo != ''
+        env:
+          SHARED_JS_FILES: ${{ matrix.entry.shared_js_files }}
         run: |
           set -euo pipefail
           mkdir -p checkout/website/src/assets/js
-          cp checkout/shared-js/*.js checkout/website/src/assets/js/
+
+          # Copying every *.js from the shared repo only works while every
+          # consumer references every file. The compiler fails the build on an
+          # unused local JS asset, so the moment the shared repo grows a second
+          # file, any site that does not reference BOTH stops building —
+          # a break in a repo whose own diff is empty.
+          #
+          # `sources.shared_js.files` in the inventory is the opt-in fix: list
+          # the filenames this site actually loads. Omitted means "all", which
+          # is what every existing entry gets.
+          if [[ -n "$SHARED_JS_FILES" ]]; then
+            for f in $SHARED_JS_FILES; do
+              if [[ ! -f "checkout/shared-js/$f" ]]; then
+                echo "::error::shared_js.files lists '$f', which does not exist in ${{ matrix.entry.shared_js_repo }}" >&2
+                exit 1
+              fi
+              cp "checkout/shared-js/$f" checkout/website/src/assets/js/
+            done
+            echo "injected shared JS (allow-list): $SHARED_JS_FILES"
+          else
+            cp checkout/shared-js/*.js checkout/website/src/assets/js/
+            echo "injected shared JS (all):"
+            find checkout/shared-js -maxdepth 1 -name '*.js' -printf '  %f\n'
+          fi
 
       - name: Checkout posts repo
         if: matrix.entry.posts_repo != ''

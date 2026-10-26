@@ -565,7 +565,7 @@ jobs:
           else
             cp checkout/shared-js/*.js checkout/website/src/assets/js/
             echo "injected shared JS (all):"
-            find checkout/shared-js -maxdepth 1 -name '*.js' -printf '  %f\n' 
+            find checkout/shared-js -maxdepth 1 -name '*.js' -printf '  %f\n'
           fi
 
       - name: Checkout posts repo

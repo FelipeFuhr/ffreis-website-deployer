@@ -140,6 +140,11 @@ jobs:
                   "compiler_embed_fonts":                "true" if top["compiler"].get("embed_fonts", False) else "",
                   "compiler_inline_body_css":            "true" if top["compiler"].get("inline_body_css", False) else "",
                   "compiler_allow_blanket_robots_disallow": "true" if top["compiler"].get("allow_blanket_robots_disallow", False) else "",
+                  # Link validation skips these; deploy.yml carries the full
+                  # rationale. Resolved here too because the skip happens at
+                  # BUILD time: a verification build that omits it fails link
+                  # validation on exactly the sites that deploy fine.
+                  "compiler_runtime_prefixes": ",".join(top["compiler"].get("runtime_prefixes", [])),
                   "disable_sections": ",".join(top["cfg"].get("disable_sections", [])),
                   "content_source":   top["cfg"].get("content_source", "prod"),
                   "tracker_enabled":     "true" if top["tracker"].get("enabled", False) else "",
@@ -511,6 +516,10 @@ jobs:
           if [[ -n "${{ matrix.entry.disable_sections }}" ]]; then
             DISABLE_SECTIONS_ARGS=("-disable-sections" "${{ matrix.entry.disable_sections }}")
           fi
+          RUNTIME_PREFIXES_ARGS=()
+          if [[ -n "${{ matrix.entry.compiler_runtime_prefixes }}" ]]; then
+            RUNTIME_PREFIXES_ARGS=("-runtime-prefixes" "${{ matrix.entry.compiler_runtime_prefixes }}")
+          fi
           TRACKER_ARGS=()
           if [[ "${{ matrix.entry.tracker_enabled }}" == "true" ]]; then
             TRACKER_ARGS=(
@@ -541,6 +550,7 @@ jobs:
             "${INLINE_BODY_CSS_ARGS[@]}" \
             "${ALLOW_BLANKET_ROBOTS_ARGS[@]}" \
             "${DISABLE_SECTIONS_ARGS[@]}" \
+            "${RUNTIME_PREFIXES_ARGS[@]}" \
             "${TRACKER_ARGS[@]}"
 
       - name: Emit content bundle

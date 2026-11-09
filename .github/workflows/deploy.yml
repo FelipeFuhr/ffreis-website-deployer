@@ -177,6 +177,15 @@ jobs:
                   "compiler_embed_fonts":                "true" if top_compiler.get("embed_fonts", False) else "",
                   "compiler_inline_body_css":            "true" if top_compiler.get("inline_body_css", False) else "",
                   "compiler_allow_blanket_robots_disallow": "true" if top_compiler.get("allow_blanket_robots_disallow", False) else "",
+                  # URL prefixes the deployment serves from a NON-STATIC origin —
+                  # an API behind the same distribution, typically. The compiler
+                  # skips them in link validation, because no file is ever compiled
+                  # for such a path and a working link into one would otherwise be
+                  # reported broken and fail the build. Build-time config, so it
+                  # belongs here and not in the site's own data: a strict site
+                  # contract requires every allowed data key to be used by a
+                  # template, and this one never is. Needs compiler v2.1.0+.
+                  "compiler_runtime_prefixes":            ",".join(top_compiler.get("runtime_prefixes", [])),
                   # Site-level list of sections to hide (blog/courses/projects); prod sets it, dev omits.
                   "disable_sections":                    ",".join(cfg.get("disable_sections", [])),
                   "builds_bucket":    top_builds.get("bucket", ""),
@@ -703,6 +712,10 @@ jobs:
           if [[ -n "${{ matrix.deployment.disable_sections }}" ]]; then
             DISABLE_SECTIONS_ARGS=("-disable-sections" "${{ matrix.deployment.disable_sections }}")
           fi
+          RUNTIME_PREFIXES_ARGS=()
+          if [[ -n "${{ matrix.deployment.compiler_runtime_prefixes }}" ]]; then
+            RUNTIME_PREFIXES_ARGS=("-runtime-prefixes" "${{ matrix.deployment.compiler_runtime_prefixes }}")
+          fi
           TRACKER_ARGS=()
           if [[ "${{ matrix.deployment.tracker_enabled }}" == "true" ]]; then
             TRACKER_ARGS=(
@@ -733,6 +746,7 @@ jobs:
             "${INLINE_BODY_CSS_ARGS[@]}" \
             "${ALLOW_BLANKET_ROBOTS_ARGS[@]}" \
             "${DISABLE_SECTIONS_ARGS[@]}" \
+            "${RUNTIME_PREFIXES_ARGS[@]}" \
             "${TRACKER_ARGS[@]}"
 
       - name: Emit content bundle
